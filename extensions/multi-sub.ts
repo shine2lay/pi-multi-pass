@@ -79,6 +79,14 @@ import {
 	recordModelExhaustion,
 	wasTargetAttempted,
 } from "./mine/model-fallback.ts";
+import {
+	parseResetUsage,
+	ResetFirstRouter,
+	usesResetFirst,
+	type ResetFirstConfig,
+	type ResetFirstHost,
+	type ResetUsage,
+} from "./mine/reset-first.ts";
 
 // ==========================================================================
 // Provider templates
@@ -405,6 +413,8 @@ interface QuotaAccount {
 }
 
 interface QuotaCheckResult {
+	/** Structured, credential-free quota data for reset-aware routing. */
+	resetUsage?: ResetUsage;
 	account: QuotaAccount;
 	kind: QuotaStatusKind;
 	summary: string;
@@ -1416,7 +1426,8 @@ const codexQuotaChecker: ProviderQuotaChecker = {
 				};
 			}
 
-			const snapshot = parseCodexUsageSnapshot(await response.json());
+			const data = await response.json();
+			const snapshot = parseCodexUsageSnapshot(data);
 			if (!snapshot.email && tokenMetadata.email) snapshot.email = tokenMetadata.email;
 			if ((!snapshot.planType || snapshot.planType === "unknown") && tokenMetadata.planType) {
 				snapshot.planType = tokenMetadata.planType;
@@ -1450,6 +1461,7 @@ const codexQuotaChecker: ProviderQuotaChecker = {
 				summary,
 				details,
 				score: classification.score,
+				resetUsage: parseResetUsage(data),
 			};
 		} catch (error: unknown) {
 			if (signal?.aborted || isAbortError(error)) throw error;
@@ -1638,6 +1650,8 @@ interface PoolConfig {
 	/** Selection strategy when picking the next member on failover.
 	 *  Defaults to "round-robin" when omitted. */
 	strategy?: PoolStrategy;
+	/** Optional per-model reset-first selection; other models keep the normal strategy. */
+	resetFirst?: ResetFirstConfig;
 	/** Per-member schedule rules (keyed by provider name).
 	 *  Only used when strategy is "scheduled". */
 	memberSchedule?: Record<string, MemberSchedule>;
@@ -2391,6 +2405,7 @@ class PoolManager {
 	private suppressNextStartTurn = false;
 	private traceEnabled = false;
 	private routingTrace: RoutingTraceEntry[] = [];
+	private resetFirst = new ResetFirstRouter();
 
 	constructor(pi: ExtensionAPI) {
 		this.pi = pi;
@@ -2703,6 +2718,51 @@ class PoolManager {
 		return undefined;
 	}
 
+	// mine/reset-first: share quota checks and eligibility between chain entry and manual selection.
+	private resetFirstHost(ctx: ExtensionContext, pools = () => loadEffectiveConfig(ctx.cwd).pools): ResetFirstHost {
+		return {
+			pools,
+			signal: ctx.signal,
+			eligible: (pool, provider, modelId) => getAuthStorage(ctx).hasAuth(provider)
+				&& Boolean(ctx.modelRegistry.find(provider, modelId))
+				&& !this.isMemberExhausted(pool, provider)
+				&& !isModelExhausted(pool.name, provider, modelId),
+			check: async (providerName, signal) => {
+				signal.throwIfAborted();
+				// Let pi refresh OAuth first; never print or persist credentials in routing diagnostics.
+				await ctx.modelRegistry.getProviderAuth(providerName);
+				signal.throwIfAborted();
+				const result = await codexQuotaChecker.check({
+					providerName, baseProvider: "openai-codex", displayName: providerName,
+					auth: getAuthStorage(ctx).get(providerName),
+				}, signal);
+				return result.resetUsage;
+			},
+			report: (message, warning, traceOnly) => {
+				this.recordTrace(message);
+				if (!traceOnly) {
+					ctx.ui.notify(message, warning ? "warning" : "info");
+					ctx.ui.setStatus("multi-pass-quota", message);
+				}
+			},
+		};
+	}
+
+	async selectResetFirst(ctx: ExtensionContext): Promise<void> {
+		if (this.resetFirst.isManagedSelection(ctx.model)) return;
+		ctx.ui.setStatus("multi-pass-quota", undefined);
+		await this.resetFirst.select(ctx.model, this.resetFirstHost(ctx), () => ctx.model, async (provider, modelId) => {
+			const model = ctx.modelRegistry.find(provider, modelId);
+			try { return model ? await this.pi.setModel(model) : false; }
+			catch {
+				ctx.ui.notify(`[pool] reset-first: unable to switch to ${provider} (${modelId})`, "warning");
+				return false;
+			}
+		});
+	}
+
+	cancelResetSelection(): void { this.resetFirst.cancel(); }
+
 	/**
 	 * Pick the best member using built-in quota checkers.
 	 * Returns the provider name with the highest remaining quota,
@@ -2757,7 +2817,7 @@ class PoolManager {
 		lastUserPrompt: string | null,
 	): Promise<void> {
 		const strategy = pool.strategy || "round-robin";
-		if (strategy === "round-robin") return;
+		if (strategy === "round-robin" || usesResetFirst(pool, currentModel.id)) return;
 
 		const poolCandidates = plan.candidates.filter(
 			(c) => c.source === "pool" && c.poolName === pool.name,
@@ -2969,6 +3029,8 @@ class PoolManager {
 			lastUserPrompt,
 		);
 
+		plan.candidates = await this.resetFirst.reorder(plan.candidates, this.resetFirstHost(ctx, () => config.pools));
+		if (ctx.signal?.aborted || ctx.model?.provider !== currentModel.provider || ctx.model?.id !== currentModel.id) return false;
 		const continuation = formatFailoverContinuation(plan.candidates[0]);
 		for (const skip of plan.skips) {
 			ctx.ui.notify(
@@ -2998,7 +3060,7 @@ class PoolManager {
 			return false;
 		}
 
-		const success = await this.pi.setModel(nextModel);
+		const success = await this.resetFirst.switchModel(nextModel, () => this.pi.setModel(nextModel));
 		if (!success) {
 			ctx.ui.notify(
 				`[pool:${nextCandidate.poolName}] ${nextCandidate.provider} skipped (authentication unavailable during switch); cascade exhausted; no later eligible target`,
@@ -5842,11 +5904,15 @@ export default function multiSub(pi: ExtensionAPI) {
 		}
 
 		await enforceProjectRestriction(ctx, "session");
+		await poolManager.selectResetFirst(ctx);
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
 		await enforceProjectRestriction(ctx, "model");
+		await poolManager.selectResetFirst(ctx);
 	});
+
+	pi.on("session_shutdown", () => poolManager.cancelResetSelection());
 
 	pi.on("input", async (event, ctx) => {
 		if (event.text.trimStart().startsWith("/")) {
