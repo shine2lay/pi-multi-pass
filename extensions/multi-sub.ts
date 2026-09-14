@@ -72,6 +72,13 @@ import {
 	matchesKey,
 	type SelectItem,
 } from "@earendil-works/pi-tui";
+// mine/model-fallback: model-scoped exhaustion for same-pool chain entries (PATCHES.md)
+import {
+	findApplicableChainForModel,
+	isModelExhausted,
+	recordModelExhaustion,
+	wasTargetAttempted,
+} from "./mine/model-fallback.ts";
 
 // ==========================================================================
 // Provider templates
@@ -2538,7 +2545,7 @@ class PoolManager {
 			if (candidateIndex < 0) break;
 			const candidate = pool.members[candidateIndex];
 			if (candidate === currentModel.provider) continue;
-			if (attemptedProviders.has(candidate)) {
+			if (wasTargetAttempted(attemptedProviders, pool.name, candidate, currentModel.id)) {
 				skips.push({
 					type: "pool-member",
 					poolName: pool.name,
@@ -2551,7 +2558,7 @@ class PoolManager {
 				pool.name,
 				candidate,
 				authStorage,
-				this.isMemberExhausted(pool, candidate),
+				this.isMemberExhausted(pool, candidate) || isModelExhausted(pool.name, candidate, currentModel.id),
 			);
 			if (skip) {
 				skips.push(skip);
@@ -2565,7 +2572,7 @@ class PoolManager {
 			});
 		}
 
-		const applicable = this.findApplicableChain(pool.name, config);
+		const applicable = findApplicableChainForModel(this.getEnabledChains(config), pool.name, currentModel.id);
 		if (!applicable) {
 			return { pool, candidates, skips };
 		}
@@ -2602,7 +2609,7 @@ class PoolManager {
 			}
 			let foundEligible = false;
 			for (const member of targetPool.members) {
-				if (attemptedProviders.has(member)) {
+				if (wasTargetAttempted(attemptedProviders, targetPool.name, member, entry.model)) {
 					skips.push({
 						type: "pool-member",
 						poolName: targetPool.name,
@@ -2617,7 +2624,7 @@ class PoolManager {
 					targetPool.name,
 					member,
 					authStorage,
-					this.isMemberExhausted(targetPool, member),
+					this.isMemberExhausted(targetPool, member) || isModelExhausted(targetPool.name, member, entry.model),
 				);
 				if (memberSkip) {
 					skips.push({
@@ -2929,7 +2936,18 @@ class PoolManager {
 		const cascade = this.ensureCascadeState(lastUserPrompt, currentModel);
 
 		// Mark current as exhausted before planning the forward-only cascade.
-		this.markExhausted(currentModel.provider);
+		// mine/model-fallback: scope exhaustion to (provider, model) first; mark the whole
+		// provider exhausted only when no untried sibling model remains for it.
+		const exhaustion = recordModelExhaustion({
+			poolName: pool.name,
+			provider: currentModel.provider,
+			modelId: currentModel.id,
+			chains: this.getEnabledChains(config),
+		});
+		this.recordTrace(exhaustion.detail);
+		if (exhaustion.escalate) {
+			this.markExhausted(currentModel.provider);
+		}
 
 		const plan = this.buildFailoverPlan(
 			currentModel,
