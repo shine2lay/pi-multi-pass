@@ -7,6 +7,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { runInNewContext } from "node:vm";
 import * as reset from "../extensions/mine/reset-first.ts";
 import * as modelFallback from "../extensions/mine/model-fallback.ts";
+import * as limits from "../extensions/mine/current-model-limits.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const now = Date.now(), day = 86400, seconds = Math.floor(now / 1000);
@@ -105,7 +106,8 @@ try {
     .replace("export default function multiSub", "function multiSub");
   let requests = [], refreshed = [], httpData = { [a]: raw(4, 1, 10, 10), [b]: raw(1, 4, 80, 70) };
   const exports = runInNewContext(`${executable}\n;({ multiSub, PoolManager });`, {
-    ...fs, ...path, ...modelFallback, ...reset,
+    ...fs, ...path, ...modelFallback, ...reset, ...limits,
+    Type: { Object: (properties) => ({ type: "object", properties }), Boolean: () => ({ type: "boolean" }), Optional: (schema) => schema },
     getAgentDir: () => temp, builtinProviders: () => [],
     getModels: () => ["claude-fable-5-1", "claude-opus-5", modelId, "gpt-5.5"].map((id) => ({ id })),
     process: { env: {} }, Buffer, URL, Headers, AbortController, AbortSignal, console,
@@ -127,11 +129,11 @@ try {
     },
     ui: { notify: (s) => notifications.push(s), setStatus: (key, value) => status.set(key, value) },
   };
-  const events = new Map(), notifications = [], status = new Map(), chosen = [], replays = [];
+  const events = new Map(), tools = new Map(), notifications = [], status = new Map(), chosen = [], replays = [];
   const emit = async (name, event = {}) => { for (const fn of events.get(name) ?? []) await fn(event, ctx); };
   const pi = {
     on: (name, fn) => events.set(name, [...(events.get(name) ?? []), fn]),
-    registerCommand() {}, registerProvider() {},
+    registerCommand() {}, registerProvider() {}, registerTool: (tool) => tools.set(tool.name, tool),
     setModel: async (next) => { const previousModel = model; model = next; chosen.push(next.provider); await emit("model_select", { model, previousModel, source: "set" }); return true; },
     sendUserMessage: (message) => replays.push(message),
   };
@@ -189,6 +191,26 @@ try {
   await pi.setModel({ provider: a, id: "gpt-5.5" });
   assert.equal(requests.length, 0);
   assert.equal(status.get("multi-pass-quota"), undefined);
+  // Real tool + footer integration, using the captured model at invocation (not a hard-coded Astra ID).
+  const tool = tools.get("current_model_limits");
+  assert.ok(tool, "tool must be registered by production extension");
+  requests = [];
+  const result = await tool.execute("test", {}, undefined, undefined, ctx);
+  assert.deepEqual(requests, [a], "explicit tool call fetches fresh current-account quota");
+  assert.equal(result.details.provider, a);
+  assert.equal(result.details.model, "gpt-5.5");
+  assert.equal(result.details.scope, "account");
+  assert.equal(result.details.cached, false);
+  assert.ok(status.get("multi-pass-limits").includes("7d"));
+  assert.ok(status.get("multi-pass-limits").includes("reset"));
+  assert.doesNotMatch(JSON.stringify(result), /fake-test-access|Authorization|accountId/);
+  requests = [];
+  await pi.setModel({ provider: "anthropic", id: "claude-fable-5-1" });
+  const unsupported = await tool.execute("test", {}, undefined, undefined, ctx);
+  assert.equal(unsupported.details.status, "unsupported");
+  assert.equal(unsupported.details.windows.length, 0);
+  assert.ok(status.get("multi-pass-limits").includes("limits unavailable"));
+  assert.equal(requests.length, 0, "never guess an Anthropic quota endpoint");
   await emit("session_shutdown");
   console.log("reset-first: ranking, deadlines, manual selection and production failover integration passed");
 } finally {

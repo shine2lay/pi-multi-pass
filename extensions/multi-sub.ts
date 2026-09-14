@@ -87,6 +87,15 @@ import {
 	type ResetFirstHost,
 	type ResetUsage,
 } from "./mine/reset-first.ts";
+import { Type } from "typebox";
+import {
+	CurrentModelLimits,
+	codexModelLimits,
+	googleModelLimits,
+	unavailableLimits,
+	formatModelLimits,
+	type ModelLimitsData,
+} from "./mine/current-model-limits.ts";
 
 // ==========================================================================
 // Provider templates
@@ -415,6 +424,7 @@ interface QuotaAccount {
 interface QuotaCheckResult {
 	/** Structured, credential-free quota data for reset-aware routing. */
 	resetUsage?: ResetUsage;
+	limits?: ModelLimitsData;
 	account: QuotaAccount;
 	kind: QuotaStatusKind;
 	summary: string;
@@ -1314,6 +1324,7 @@ async function checkGoogleQuotaAccount(
 			summary: `${getGoogleQuotaBucketLabel(account, snapshot.models.length)} | bottleneck ${formatRemainingPercent(snapshot.worstRemainingPercent)} | ${formatQuotaKind(classification.kind)}`,
 			details: formatGoogleQuotaDetails(account, snapshot, classification.kind),
 			score: classification.score,
+			limits: googleModelLimits(snapshot),
 		};
 	} catch (error: unknown) {
 		if (signal?.aborted || isAbortError(error)) throw error;
@@ -1428,6 +1439,7 @@ const codexQuotaChecker: ProviderQuotaChecker = {
 
 			const data = await response.json();
 			const snapshot = parseCodexUsageSnapshot(data);
+			const resetUsage = parseResetUsage(data);
 			if (!snapshot.email && tokenMetadata.email) snapshot.email = tokenMetadata.email;
 			if ((!snapshot.planType || snapshot.planType === "unknown") && tokenMetadata.planType) {
 				snapshot.planType = tokenMetadata.planType;
@@ -1461,7 +1473,8 @@ const codexQuotaChecker: ProviderQuotaChecker = {
 				summary,
 				details,
 				score: classification.score,
-				resetUsage: parseResetUsage(data),
+				resetUsage,
+				limits: codexModelLimits(resetUsage),
 			};
 		} catch (error: unknown) {
 			if (signal?.aborted || isAbortError(error)) throw error;
@@ -2406,6 +2419,8 @@ class PoolManager {
 	private traceEnabled = false;
 	private routingTrace: RoutingTraceEntry[] = [];
 	private resetFirst = new ResetFirstRouter();
+	private modelLimits = new CurrentModelLimits();
+	private limitsGeneration = 0;
 
 	constructor(pi: ExtensionAPI) {
 		this.pi = pi;
@@ -2736,6 +2751,7 @@ class PoolManager {
 					providerName, baseProvider: "openai-codex", displayName: providerName,
 					auth: getAuthStorage(ctx).get(providerName),
 				}, signal);
+				if (result.limits) this.modelLimits.remember(providerName, result.limits);
 				return result.resetUsage;
 			},
 			report: (message, warning, traceOnly) => {
@@ -2761,7 +2777,34 @@ class PoolManager {
 		});
 	}
 
-	cancelResetSelection(): void { this.resetFirst.cancel(); }
+	cancelResetSelection(): void {
+		this.resetFirst.cancel();
+		this.limitsGeneration++;
+		this.modelLimits.cancel();
+	}
+
+	async getCurrentModelLimits(ctx: ExtensionContext, refresh = false, signal = ctx.signal) {
+		const model = ctx.model;
+		const generation = ++this.limitsGeneration;
+		const report = await this.modelLimits.get(model, async (providerName, querySignal) => {
+			const baseProvider = getBaseProvider(providerName) || providerName;
+			const checker = PROVIDER_QUOTA_CHECKERS.find((c) => c.baseProvider === baseProvider);
+			if (!checker) return unavailableLimits(`No configured subscription-quota source for ${baseProvider}. This does not mean unlimited usage.`, true);
+			querySignal.throwIfAborted();
+			await ctx.modelRegistry.getProviderAuth(providerName);
+			querySignal.throwIfAborted();
+			const result = await checker.check({ providerName, baseProvider, displayName: providerName,
+				auth: getAuthStorage(ctx).get(providerName) }, querySignal);
+			return result.limits ?? unavailableLimits(result.kind === "missing-auth"
+				? "Authentication is missing or expired; log in again."
+				: "The quota check returned no usable limit data.");
+		}, { refresh, signal });
+		if (!signal?.aborted && generation === this.limitsGeneration
+			&& ctx.model?.provider === model?.provider && ctx.model?.id === model?.id) {
+			ctx.ui.setStatus("multi-pass-limits", formatModelLimits(report));
+		}
+		return report;
+	}
 
 	/**
 	 * Pick the best member using built-in quota checkers.
@@ -5905,11 +5948,13 @@ export default function multiSub(pi: ExtensionAPI) {
 
 		await enforceProjectRestriction(ctx, "session");
 		await poolManager.selectResetFirst(ctx);
+		await poolManager.getCurrentModelLimits(ctx);
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
 		await enforceProjectRestriction(ctx, "model");
 		await poolManager.selectResetFirst(ctx);
+		await poolManager.getCurrentModelLimits(ctx);
 	});
 
 	pi.on("session_shutdown", () => poolManager.cancelResetSelection());
@@ -5973,6 +6018,20 @@ export default function multiSub(pi: ExtensionAPI) {
 				}
 			}
 		}
+	});
+
+	// Quota snapshots are refreshed after runs (60-second cache), never by background polling.
+	pi.on("agent_end", async (_event, ctx) => { await poolManager.getCurrentModelLimits(ctx); });
+	pi.registerTool({
+		name: "current_model_limits",
+		label: "Current Model Limits",
+		description: "Check subscription quota and reset times for the active model/account. Reports scope, checkedAt, cached status, and unavailable/unsupported providers explicitly. Never equate local token usage with remaining subscription quota.",
+		promptSnippet: "Check the current model/account's remaining subscription quota and reset times",
+		parameters: Type.Object({ refresh: Type.Optional(Type.Boolean({ description: "Fetch fresh quota data (default true); false allows a 60-second cache." })) }),
+		async execute(_toolCallId, { refresh = true }, signal, _onUpdate, ctx) {
+			const report = await poolManager.getCurrentModelLimits(ctx, refresh, signal);
+			return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], details: report };
+		},
 	});
 
 	// Register /subs command
