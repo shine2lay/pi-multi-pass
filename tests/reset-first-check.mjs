@@ -127,9 +127,20 @@ try {
       getProviderAuth: async (p) => { refreshed.push(p); },
       find: (provider, id) => known.has(provider) && !missingModels.has(provider) ? { provider, id } : undefined,
     },
-    ui: { notify: (s) => notifications.push(s), setStatus: (key, value) => status.set(key, value) },
+    ui: { notify: (s) => notifications.push(s), setStatus: (key, value) => {
+      // Match pi-web-ui: a stable key replaces its text; undefined/empty removes it.
+      if (value === undefined || value === "") status.delete(key);
+      else status.set(key, value);
+    } },
   };
   const events = new Map(), tools = new Map(), notifications = [], status = new Map(), chosen = [], replays = [];
+  const assertSingleQuotaFooter = () => {
+    assert.deepEqual([...status.keys()].filter((key) => key === "multi-pass-quota" || key === "multi-pass-limits"),
+      ["multi-pass-limits"], "exactly one quota footer; selector diagnostics must not persist there");
+    assert.equal(status.get("unrelated-extension"), "preserve me");
+  };
+  status.set("multi-pass-quota", "old selector snapshot surviving reload");
+  status.set("unrelated-extension", "preserve me");
   const emit = async (name, event = {}) => { for (const fn of events.get(name) ?? []) await fn(event, ctx); };
   const pi = {
     on: (name, fn) => events.set(name, [...(events.get(name) ?? []), fn]),
@@ -140,6 +151,7 @@ try {
   modelFallback.clearModelExhaustion();
   exports.multiSub(pi);
   await emit("session_start");
+  assertSingleQuotaFooter();
   await emit("before_agent_start", { prompt: "test prompt" });
   const fail = () => emit("agent_end", { messages: [{ role: "assistant", stopReason: "error", errorMessage: "usage limit reached" }] });
   await fail();
@@ -150,7 +162,8 @@ try {
   assert.equal(model.provider, b, "chain entry must apply destination pool reset-first policy");
   assert.deepEqual(requests, [a, b]);
   assert.ok(status.get("multi-pass").includes(`active ${b}`));
-  assert.ok(status.get("multi-pass-quota").includes(`prefers ${b}`));
+  assert.ok(notifications.some((message) => message.includes(`reset-first prefers ${b}`)));
+  assertSingleQuotaFooter();
   assert.equal(replays.length, 0, "leave automatic retries to pi; never queue duplicate prompts");
   // Current Astra account fails: query remaining account, do not reroute back via model_select.
   requests = [];
@@ -169,7 +182,8 @@ try {
   httpData = { [a]: weeklyOnly(4), [b]: weeklyOnly(1) }; requests = [];
   await pi.setModel({ provider: a, id: modelId });
   assert.equal(model.provider, b, "manual selection with real weekly-only API shape");
-  assert.ok(status.get("multi-pass-quota").includes("5h not reported"));
+  assert.ok(notifications.some((message) => message.includes("5h not reported")));
+  assertSingleQuotaFooter();
   // Missing model / logged-out account cannot enter selection.
   missingModels.add(b); requests = [];
   await pi.setModel({ provider: a, id: modelId });
@@ -204,12 +218,25 @@ try {
   assert.ok(status.get("multi-pass-limits").includes("7d"));
   assert.ok(status.get("multi-pass-limits").includes("reset"));
   assert.doesNotMatch(JSON.stringify(result), /fake-test-access|Authorization|accountId/);
+  // Fresh checks and run completion replace the same quota slot, including migration of old UI state.
+  const originalFooter = status.get("multi-pass-limits");
+  for (const used of [40, 41, 42]) {
+    status.set("multi-pass-quota", "stale reset-first quota");
+    httpData[a].rate_limit.primary_window.used_percent = used;
+    await tool.execute("test", {}, undefined, undefined, ctx);
+    await emit("agent_end", { messages: [] });
+    assertSingleQuotaFooter();
+    assert.ok(status.get("multi-pass-limits").includes(`7d ${100 - used}% left`));
+    assert.notEqual(status.get("multi-pass-limits"), originalFooter);
+    assert.doesNotMatch(status.get("multi-pass-limits"), /reset-first prefers|stale/);
+  }
   requests = [];
   await pi.setModel({ provider: "anthropic", id: "claude-fable-5-1" });
   const unsupported = await tool.execute("test", {}, undefined, undefined, ctx);
   assert.equal(unsupported.details.status, "unsupported");
   assert.equal(unsupported.details.windows.length, 0);
   assert.ok(status.get("multi-pass-limits").includes("limits unavailable"));
+  assertSingleQuotaFooter();
   assert.equal(requests.length, 0, "never guess an Anthropic quota endpoint");
   await emit("session_shutdown");
   console.log("reset-first: ranking, deadlines, manual selection and production failover integration passed");

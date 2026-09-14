@@ -116,8 +116,9 @@ Only rank the next failover group: **never promote Astra ahead of Opus** or move
 chain entries. Check even a single remaining candidate so exhausted accounts are skipped. Suppress
 only the router's own model-select events; preserve cascade tracking and pi's existing retry behavior.
 Selection state is per session, stale selections are cancelled, and shutdown cancels pending checks.
-`multi-pass-quota` shows the preferred account with usage and UTC reset timestamps; `/pool trace`
+Selection notifications show the preferred account with usage and UTC reset timestamps; `/pool trace`
 records each checked account without credentials. These are selection-time snapshots, not live meters.
+The original `multi-pass-quota` footer slot is retired by `single-quota-footer` below.
 **Hooks in `extensions/multi-sub.ts`:** `codexQuotaChecker.check()` exposes strict structured quota;
 `PoolConfig.resetFirst`; `PoolManager.resetFirstHost()` adapts auth/eligibility/diagnostics;
 `reorderCandidatesByStrategy()` defers matching models to the override; `handleError()` ranks before
@@ -162,3 +163,21 @@ real tool registration and host integration, and unsupported Anthropic behavior.
 verification also succeeded; no paid model request was made for that verification.
 **Compat:** no persistent configuration/schema change. Removing this patch removes only the tool
 and quota footer; reset-first selection and ordinary pools/chains keep working.
+
+### single-quota-footer  ·  status: local
+**Why:** the selector persisted a `multi-pass-quota` snapshot while the limits feature updated
+`multi-pass-limits`. pi-web-ui joins these distinct status slots, showing duplicate quota with different
+percentages (e.g. a fresh 60% next to the older selector's 61%). They were not appended indefinitely,
+but the second persistent snapshot was confusing and stale.
+**Behavior:** only `multi-pass-limits` publishes persistent quota text. Selector reasoning remains in
+notifications and routing trace. Clear the retired `multi-pass-quota` key on limits refresh, including
+after reload, so existing UI state is cleaned up. Repeated refreshes replace the same summary.
+Keep the chain/preset `multi-pass` status and other extensions' status entries unchanged.
+**Hooks in `extensions/multi-sub.ts`:** `PoolManager.resetFirstHost().report` no longer publishes a
+footer entry; `getCurrentModelLimits()` removes the legacy key before updating the canonical one.
+**Files:** `extensions/multi-sub.ts`, `tests/reset-first-check.mjs`
+**Test:** `node tests/reset-first-check.mjs` reproduces the two-slot bug before this fix and asserts
+one quota slot after chain fallback, manual selection, repeated fresh checks, run completion, legacy
+state cleanup and switching to unsupported Anthropic. Uses actual production code and pi-web-ui's
+keyed replacement/removal semantics; unrelated status entries are preserved.
+**Compat:** no configuration change. `/reload` activates the fix and clears the older quota slot.

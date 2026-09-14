@@ -2758,7 +2758,6 @@ class PoolManager {
 				this.recordTrace(message);
 				if (!traceOnly) {
 					ctx.ui.notify(message, warning ? "warning" : "info");
-					ctx.ui.setStatus("multi-pass-quota", message);
 				}
 			},
 		};
@@ -2784,6 +2783,8 @@ class PoolManager {
 	}
 
 	async getCurrentModelLimits(ctx: ExtensionContext, refresh = false, signal = ctx.signal) {
+		// Retire older selector snapshots; only multi-pass-limits owns the quota footer.
+		ctx.ui.setStatus("multi-pass-quota", undefined);
 		const model = ctx.model;
 		const generation = ++this.limitsGeneration;
 		const report = await this.modelLimits.get(model, async (providerName, querySignal) => {
