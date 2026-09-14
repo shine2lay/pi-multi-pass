@@ -96,6 +96,10 @@ import {
 	formatModelLimits,
 	type ModelLimitsData,
 } from "./mine/current-model-limits.ts";
+import { parseAnthropicQuotaHeaders, anthropicModelLimits } from "./mine/anthropic-quota.ts";
+import { QuotaStateStore, quotaAccountKey, type QuotaWindow } from "./mine/quota-state.ts";
+import { usesQuotaRouting, type QuotaRoutingConfig } from "./mine/account-policy.ts";
+import { QuotaRouter, type QuotaRoutingHost } from "./mine/quota-routing.ts";
 
 // ==========================================================================
 // Provider templates
@@ -1665,6 +1669,8 @@ interface PoolConfig {
 	strategy?: PoolStrategy;
 	/** Optional per-model reset-first selection; other models keep the normal strategy. */
 	resetFirst?: ResetFirstConfig;
+	/** Opt-in sticky account routing; takes precedence over resetFirst for matching models. */
+	quotaRouting?: QuotaRoutingConfig;
 	/** Per-member schedule rules (keyed by provider name).
 	 *  Only used when strategy is "scheduled". */
 	memberSchedule?: Record<string, MemberSchedule>;
@@ -2420,6 +2426,7 @@ class PoolManager {
 	private routingTrace: RoutingTraceEntry[] = [];
 	private resetFirst = new ResetFirstRouter();
 	private modelLimits = new CurrentModelLimits();
+	private quotaRouter = new QuotaRouter(new QuotaStateStore(join(getAgentDir(), "multi-pass-quota")));
 	private limitsGeneration = 0;
 
 	constructor(pi: ExtensionAPI) {
@@ -2554,7 +2561,7 @@ class PoolManager {
 	buildFailoverPlan(
 		currentModel: Model<Api>,
 		config: MultiPassConfig,
-		authStorage: { hasAuth(provider: string): boolean },
+		authStorage: { hasAuth(provider: string): boolean; get?(provider: string): unknown },
 		options?: FailoverPlanOptions,
 	): FailoverPlan {
 		const attemptedProviders = options?.attemptedProviders ?? new Set<string>();
@@ -2588,7 +2595,8 @@ class PoolManager {
 				pool.name,
 				candidate,
 				authStorage,
-				this.isMemberExhausted(pool, candidate) || isModelExhausted(pool.name, candidate, currentModel.id),
+				this.quotaTargetBlocked(pool, candidate, currentModel.id, authStorage)
+					?? (this.isMemberExhausted(pool, candidate) || isModelExhausted(pool.name, candidate, currentModel.id)),
 			);
 			if (skip) {
 				skips.push(skip);
@@ -2654,7 +2662,8 @@ class PoolManager {
 					targetPool.name,
 					member,
 					authStorage,
-					this.isMemberExhausted(targetPool, member) || isModelExhausted(targetPool.name, member, entry.model),
+					this.quotaTargetBlocked(targetPool, member, entry.model, authStorage)
+						?? (this.isMemberExhausted(targetPool, member) || isModelExhausted(targetPool.name, member, entry.model)),
 				);
 				if (memberSkip) {
 					skips.push({
@@ -2733,6 +2742,83 @@ class PoolManager {
 		return undefined;
 	}
 
+	// mine/quota-routing: host adapters own credentials/effects; pure policies only see quota facts.
+	private quotaKey(ctx: ExtensionContext, provider: string): string | undefined {
+		return quotaAccountKey(provider, getAuthStorage(ctx).get(provider));
+	}
+
+	private quotaTargetBlocked(pool: PoolConfig, provider: string, modelId: string,
+		auth: { get?(provider: string): unknown }): boolean | undefined {
+		const key = quotaAccountKey(provider, auth.get?.(provider));
+		return usesQuotaRouting(pool, modelId) && key ? this.quotaRouter.blocked(key, modelId) : undefined;
+	}
+
+	private rememberQuotaResult(ctx: ExtensionContext, provider: string, result: QuotaCheckResult): void {
+		if (result.limits) this.modelLimits.remember(provider, result.limits);
+		if (!result.resetUsage) return;
+		const now = Date.now(), windows: QuotaWindow[] = [];
+		for (const [name, w] of [["5h", result.resetUsage.fiveHour], ["7d", result.resetUsage.weekly]] as const) {
+			if (w) windows.push({ name, scope: "account", usedPercent: w.usedPercent, resetAt: w.resetAt,
+				limited: w.usedPercent >= 100, observedAt: now });
+		}
+		const blockedResets = windows.filter((w) => w.limited && w.resetAt && w.resetAt * 1000 > now).map((w) => w.resetAt!);
+		windows.push({ name: "account-status", scope: "account", limited: result.resetUsage.limited,
+			resetAt: blockedResets.length ? Math.max(...blockedResets) : undefined, observedAt: now });
+		this.quotaRouter.observe(this.quotaKey(ctx, provider), windows);
+	}
+
+	captureQuotaRequest(ctx: ExtensionContext) {
+		if (!ctx.model || getBaseProvider(ctx.model.provider) !== "anthropic") return undefined;
+		const key = this.quotaKey(ctx, ctx.model.provider);
+		return key ? { key, provider: ctx.model.provider, modelId: ctx.model.id, signal: ctx.signal } : undefined;
+	}
+
+	async observeQuotaResponse(request: ReturnType<PoolManager["captureQuotaRequest"]>,
+		event: { headers: Record<string, string>; status: number }, ctx: ExtensionContext): Promise<void> {
+		if (!request || request.signal?.aborted || this.quotaKey(ctx, request.provider) !== request.key) return;
+		const windows = parseAnthropicQuotaHeaders(event.headers, request.modelId);
+		this.quotaRouter.observe(request.key, windows, event.status >= 200 && event.status < 300 ? request.modelId : undefined);
+		if (windows.length && ctx.model?.provider === request.provider && ctx.model.id === request.modelId) {
+			await this.getCurrentModelLimits(ctx);
+		}
+	}
+
+	private quotaRoutingHost(ctx: ExtensionContext): QuotaRoutingHost {
+		return {
+			pools: () => loadEffectiveConfig(ctx.cwd).pools,
+			accountKey: (provider) => this.quotaKey(ctx, provider),
+			eligible: (pool, provider, modelId) => getAuthStorage(ctx).hasAuth(provider)
+				&& Boolean(ctx.modelRegistry.find(provider, modelId))
+				&& !(this.quotaTargetBlocked(pool, provider, modelId, getAuthStorage(ctx))
+					?? (this.isMemberExhausted(pool, provider) || isModelExhausted(pool.name, provider, modelId))),
+			check: async (provider, signal) => {
+				if (getBaseProvider(provider) !== "openai-codex") return; // Anthropic is passive; never send probes.
+				await this.modelLimits.get({ provider, id: ctx.model?.id ?? "" }, async (_provider, querySignal) => {
+					await ctx.modelRegistry.getProviderAuth(provider);
+					querySignal.throwIfAborted();
+					const result = await codexQuotaChecker.check({ providerName: provider, baseProvider: "openai-codex",
+						displayName: provider, auth: getAuthStorage(ctx).get(provider) }, querySignal);
+					if (!querySignal.aborted) this.rememberQuotaResult(ctx, provider, result);
+					return result.limits ?? unavailableLimits("Quota metadata unavailable; retain last observation.");
+				}, { signal });
+			},
+			current: () => ctx.model,
+			setModel: async (provider, modelId) => {
+				const model = ctx.modelRegistry.find(provider, modelId);
+				return model ? this.resetFirst.switchModel(model, () => this.pi.setModel(model)) : false;
+			},
+			report: (message) => { this.recordTrace(message); ctx.ui.notify(message, "info"); },
+			signal: ctx.signal,
+		};
+	}
+
+	manualQuotaSelection(): void { this.quotaRouter.manualSelection(); }
+	isManagedSelection(ctx: ExtensionContext): boolean { return this.resetFirst.isManagedSelection(ctx.model); }
+	async recoverQuotaAccount(ctx: ExtensionContext): Promise<void> {
+		if (ctx.isIdle?.() !== true || ctx.signal?.aborted) return;
+		await this.quotaRouter.recover(this.quotaRoutingHost(ctx));
+	}
+
 	// mine/reset-first: share quota checks and eligibility between chain entry and manual selection.
 	private resetFirstHost(ctx: ExtensionContext, pools = () => loadEffectiveConfig(ctx.cwd).pools): ResetFirstHost {
 		return {
@@ -2751,7 +2837,7 @@ class PoolManager {
 					providerName, baseProvider: "openai-codex", displayName: providerName,
 					auth: getAuthStorage(ctx).get(providerName),
 				}, signal);
-				if (result.limits) this.modelLimits.remember(providerName, result.limits);
+				if (!signal.aborted) this.rememberQuotaResult(ctx, providerName, result);
 				return result.resetUsage;
 			},
 			report: (message, warning, traceOnly) => {
@@ -2765,6 +2851,9 @@ class PoolManager {
 
 	async selectResetFirst(ctx: ExtensionContext): Promise<void> {
 		if (this.resetFirst.isManagedSelection(ctx.model)) return;
+		this.resetFirst.cancel();
+		const pool = loadEffectiveConfig(ctx.cwd).pools.findLast((p) => p.enabled && ctx.model && p.members.includes(ctx.model.provider));
+		if (ctx.model && usesQuotaRouting(pool, ctx.model.id)) return; // preserve the chosen healthy account
 		ctx.ui.setStatus("multi-pass-quota", undefined);
 		await this.resetFirst.select(ctx.model, this.resetFirstHost(ctx), () => ctx.model, async (provider, modelId) => {
 			const model = ctx.modelRegistry.find(provider, modelId);
@@ -2777,6 +2866,7 @@ class PoolManager {
 	}
 
 	cancelResetSelection(): void {
+		this.quotaRouter.cancel();
 		this.resetFirst.cancel();
 		this.limitsGeneration++;
 		this.modelLimits.cancel();
@@ -2787,6 +2877,13 @@ class PoolManager {
 		ctx.ui.setStatus("multi-pass-quota", undefined);
 		const model = ctx.model;
 		const generation = ++this.limitsGeneration;
+		if (model && getBaseProvider(model.provider) === "anthropic") {
+			const key = this.quotaKey(ctx, model.provider);
+			const report = anthropicModelLimits(this.quotaRouter.state(key), model.provider, model.id);
+			if (!key) Object.assign(report, unavailableLimits("Subscription quota requires OAuth; API-key limits are separate.", true));
+			if (!signal?.aborted) ctx.ui.setStatus("multi-pass-limits", formatModelLimits(report));
+			return report;
+		}
 		const report = await this.modelLimits.get(model, async (providerName, querySignal) => {
 			const baseProvider = getBaseProvider(providerName) || providerName;
 			const checker = PROVIDER_QUOTA_CHECKERS.find((c) => c.baseProvider === baseProvider);
@@ -2796,6 +2893,7 @@ class PoolManager {
 			querySignal.throwIfAborted();
 			const result = await checker.check({ providerName, baseProvider, displayName: providerName,
 				auth: getAuthStorage(ctx).get(providerName) }, querySignal);
+			if (!querySignal.aborted) this.rememberQuotaResult(ctx, providerName, result);
 			return result.limits ?? unavailableLimits(result.kind === "missing-auth"
 				? "Authentication is missing or expired; log in again."
 				: "The quota check returned no usable limit data.");
@@ -2861,7 +2959,7 @@ class PoolManager {
 		lastUserPrompt: string | null,
 	): Promise<void> {
 		const strategy = pool.strategy || "round-robin";
-		if (strategy === "round-robin" || usesResetFirst(pool, currentModel.id)) return;
+		if (strategy === "round-robin" || usesResetFirst(pool, currentModel.id) || usesQuotaRouting(pool, currentModel.id)) return;
 
 		const poolCandidates = plan.candidates.filter(
 			(c) => c.source === "pool" && c.poolName === pool.name,
@@ -3037,6 +3135,7 @@ class PoolManager {
 		if (!pool) return false;
 
 		this.recordTrace(`${currentModel.provider} failed with ${summarizeTraceError(errorMessage)}`);
+		if (usesQuotaRouting(pool, currentModel.id)) this.quotaRouter.failed(this.quotaKey(ctx, currentModel.provider), currentModel.id);
 		const cascade = this.ensureCascadeState(lastUserPrompt, currentModel);
 
 		// Mark current as exhausted before planning the forward-only cascade.
@@ -3073,7 +3172,8 @@ class PoolManager {
 			lastUserPrompt,
 		);
 
-		plan.candidates = await this.resetFirst.reorder(plan.candidates, this.resetFirstHost(ctx, () => config.pools));
+		plan.candidates = await this.quotaRouter.reorder(plan.candidates, this.quotaRoutingHost(ctx),
+			(group) => this.resetFirst.reorder(group, this.resetFirstHost(ctx, () => loadEffectiveConfig(ctx.cwd).pools)));
 		if (ctx.signal?.aborted || ctx.model?.provider !== currentModel.provider || ctx.model?.id !== currentModel.id) return false;
 		const continuation = formatFailoverContinuation(plan.candidates[0]);
 		for (const skip of plan.skips) {
@@ -3104,6 +3204,13 @@ class PoolManager {
 			return false;
 		}
 
+		// Network checks may outlive a project config edit; validate the effective target again.
+		const fresh = loadEffectiveConfig(ctx.cwd);
+		if (!fresh.pools.some((p) => p.enabled && p.name === nextCandidate.poolName && p.members.includes(nextCandidate.provider))
+			|| fresh.allowedProviderNames && !fresh.allowedProviderNames.includes(nextCandidate.provider)) {
+			this.recordTrace(`${nextCandidate.provider} skipped because effective project access changed during selection`);
+			return false;
+		}
 		const success = await this.resetFirst.switchModel(nextModel, () => this.pi.setModel(nextModel));
 		if (!success) {
 			ctx.ui.notify(
@@ -5952,7 +6059,8 @@ export default function multiSub(pi: ExtensionAPI) {
 		await poolManager.getCurrentModelLimits(ctx);
 	});
 
-	pi.on("model_select", async (_event, ctx) => {
+	pi.on("model_select", async (event, ctx) => {
+		if (!poolManager.isManagedSelection(ctx) && event.source !== "restore") poolManager.manualQuotaSelection();
 		await enforceProjectRestriction(ctx, "model");
 		await poolManager.selectResetFirst(ctx);
 		await poolManager.getCurrentModelLimits(ctx);
@@ -5960,11 +6068,21 @@ export default function multiSub(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => poolManager.cancelResetSelection());
 
+	// Capture request identity before response arrival; never attribute a late response to a newly selected account.
+	let quotaRequest: ReturnType<PoolManager["captureQuotaRequest"]>;
+	pi.on("before_provider_request", (_event, ctx) => { quotaRequest = poolManager.captureQuotaRequest(ctx); });
+	pi.on("after_provider_response", async (event, ctx) => {
+		const request = quotaRequest;
+		quotaRequest = undefined;
+		await poolManager.observeQuotaResponse(request, event, ctx);
+	});
+
 	pi.on("input", async (event, ctx) => {
 		if (event.text.trimStart().startsWith("/")) {
 			return { action: "continue" as const };
 		}
 		const ok = await enforceProjectRestriction(ctx, "input");
+		if (ok && event.source !== "extension") await poolManager.recoverQuotaAccount(ctx);
 		return ok ? { action: "continue" as const } : { action: "handled" as const };
 	});
 
@@ -6028,7 +6146,7 @@ export default function multiSub(pi: ExtensionAPI) {
 		label: "Current Model Limits",
 		description: "Check subscription quota and reset times for the active model/account. Reports scope, checkedAt, cached status, and unavailable/unsupported providers explicitly. Never equate local token usage with remaining subscription quota.",
 		promptSnippet: "Check the current model/account's remaining subscription quota and reset times",
-		parameters: Type.Object({ refresh: Type.Optional(Type.Boolean({ description: "Fetch fresh quota data (default true); false allows a 60-second cache." })) }),
+		parameters: Type.Object({ refresh: Type.Optional(Type.Boolean({ description: "Fetch queryable quota (default true), or read the latest passive Anthropic observation. False allows a 60-second query cache. Never sends model probes." })) }),
 		async execute(_toolCallId, { refresh = true }, signal, _onUpdate, ctx) {
 			const report = await poolManager.getCurrentModelLimits(ctx, refresh, signal);
 			return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], details: report };

@@ -8,6 +8,10 @@ import { runInNewContext } from "node:vm";
 import * as reset from "../extensions/mine/reset-first.ts";
 import * as modelFallback from "../extensions/mine/model-fallback.ts";
 import * as limits from "../extensions/mine/current-model-limits.ts";
+import * as quotaState from "../extensions/mine/quota-state.ts";
+import * as quotaPolicy from "../extensions/mine/account-policy.ts";
+import * as quotaRouting from "../extensions/mine/quota-routing.ts";
+import * as anthropicQuota from "../extensions/mine/anthropic-quota.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const now = Date.now(), day = 86400, seconds = Math.floor(now / 1000);
@@ -106,7 +110,7 @@ try {
     .replace("export default function multiSub", "function multiSub");
   let requests = [], refreshed = [], httpData = { [a]: raw(4, 1, 10, 10), [b]: raw(1, 4, 80, 70) };
   const exports = runInNewContext(`${executable}\n;({ multiSub, PoolManager });`, {
-    ...fs, ...path, ...modelFallback, ...reset, ...limits,
+    ...fs, ...path, ...modelFallback, ...reset, ...limits, ...quotaState, ...quotaPolicy, ...quotaRouting, ...anthropicQuota,
     Type: { Object: (properties) => ({ type: "object", properties }), Boolean: () => ({ type: "boolean" }), Optional: (schema) => schema },
     getAgentDir: () => temp, builtinProviders: () => [],
     getModels: () => ["claude-fable-5-1", "claude-opus-5", modelId, "gpt-5.5"].map((id) => ({ id })),
@@ -233,7 +237,7 @@ try {
   requests = [];
   await pi.setModel({ provider: "anthropic", id: "claude-fable-5-1" });
   const unsupported = await tool.execute("test", {}, undefined, undefined, ctx);
-  assert.equal(unsupported.details.status, "unsupported");
+  assert.equal(unsupported.details.status, "unavailable", "OAuth observation source exists but no headers have arrived yet");
   assert.equal(unsupported.details.windows.length, 0);
   assert.ok(status.get("multi-pass-limits").includes("limits unavailable"));
   assertSingleQuotaFooter();

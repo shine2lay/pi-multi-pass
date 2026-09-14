@@ -5,16 +5,19 @@ export interface LimitWindow {
 	remainingPercent?: number;
 	usedPercent?: number;
 	resetAt?: string; // UTC ISO timestamp
+	scope?: "account" | "model";
+	observedAt?: string;
 }
 
 export interface ModelLimitsData {
 	status: "available" | "unsupported" | "unavailable";
-	scope: "account" | "provider-model-buckets" | "unknown";
+	scope: "account" | "account-and-model" | "provider-model-buckets" | "unknown";
 	source?: string;
 	limited?: boolean;
 	windows: LimitWindow[];
 	note?: string;
 	omittedWindows?: number;
+	stale?: boolean;
 }
 
 export interface ModelLimitsReport extends ModelLimitsData {
@@ -75,7 +78,9 @@ export function formatModelLimits(report: ModelLimitsReport): string {
 		const when = w.resetAt ? `${w.resetAt.slice(5, 10)} ${w.resetAt.slice(11, 16)}Z` : "unknown";
 		return `${w.name} ${left} left, reset ${when}`;
 	});
-	return `${label} (account): ${windows.join(" | ")}${report.limited ? " | limited" : ""}`;
+	const scope = report.scope === "account-and-model" ? "account + model" : "account";
+	const observation = report.source === "Anthropic OAuth response headers" ? " | observed" : "";
+	return `${label} (${scope}): ${windows.join(" | ")}${report.limited ? " | limited" : ""}${observation}${report.stale ? " (stale)" : ""}`;
 }
 
 /** Per-session, credential-free snapshots. No polling timers or automatic model requests. */

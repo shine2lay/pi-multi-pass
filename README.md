@@ -389,13 +389,66 @@ Currently implemented:
 
 Google quota is not a single flat subscription bucket, so the details view shows one line per returned Gemini family or Antigravity model with its remaining headroom and reset time.
 
-`/subs limits` is an on-demand snapshot. It helps you see which account looks healthiest right now. Automatic switching still happens when the active provider returns a rate-limit-style runtime error and that provider belongs to an enabled pool or chain.
+`/subs limits` is an on-demand snapshot. It helps you see which account looks healthiest right now. By default, automatic switching happens when the active provider returns a rate-limit-style runtime error and that provider belongs to an enabled pool or chain. This fork also offers opt-in recovery selection below.
 
 When a pool uses the `quota-first` strategy, the same quota checkers are used automatically during failover to pick the healthiest member instead of just round-robin.
 
 When a project defines `.pi/multi-pass.json` with `allowedSubs`, `/subs limits` only shows accounts allowed in that project.
 
 Future providers can add another checker without changing the `/subs` command surface.
+
+## Fork: sticky quota-aware account rotation
+
+Add `quotaRouting` to a pool in `~/.pi/agent/multi-pass.json` (or a project pool override):
+
+```json
+"quotaRouting": {
+  "policy": "weekly-first",
+  "recovery": "earlier-weekly-reset",
+  "minWeeklyResetAdvantageMinutes": 0,
+  "maxObservationAgeMinutes": 1440
+}
+```
+
+- **Stay on the chosen subscription until a runtime limit.** No per-message round-robin,
+  proactive low-headroom threshold, or periodic rotation timer.
+- On failure, choose usable accounts by **earliest weekly reset, then five-hour reset,
+  then comparable headroom**. Unknown quota retains eligible fallback order; it is never
+  treated as unlimited. A reported cap blocks only its applicable account/model scope.
+- A previously failed account becomes eligible after its known reset or conservative retry
+  deadline. At the next **idle user-input boundary**, return only if its last observed usable
+  weekly allowance resets earlier than the current account's. No minimum hold period applies.
+  This is a recovery *attempt*, not proof the new five-hour window is unused. Failures back off.
+- Explicit manual model/account selection suppresses prior recovery intent in that session.
+  Recovery never interrupts a running turn, tool loop, queued steering input, or automatic retry.
+- Model order still comes from the configured chain. This policy reorders accounts within one
+  model's pool; it does not jump to another model to burn quota or implement cross-model failback.
+
+Omit `models` to apply to every model in a pool, or add an exact model-ID array. Set `recovery`
+to `"off"` for failure-only selection. `minWeeklyResetAdvantageMinutes` can require a larger
+reset advantage; zero still requires a strictly earlier reset. `maxObservationAgeMinutes`
+controls ranking freshness, not the expiry of explicit exhaustion deadlines. Missing or expired
+percentages stay unknown. Remove `quotaRouting` to restore the existing strategy. For matching
+models it takes precedence over `resetFirst`; unpatched upstream harmlessly ignores it.
+
+**Anthropic OAuth:** normal response headers populate five-hour, weekly, and reported model-specific
+quota snapshots. `current_model_limits` and the single quota footer show the last observation and
+staleness. No model probes, undocumented usage endpoint, authentication override, background polling,
+or API-key subscription-quota guesses. The first ordinary response must supply usable headers;
+missing headers remain unavailable. `/subs limits` still lists only the queryable Codex/Google sources.
+The installed transport exposes successful responses; some error responses have no header event.
+Errors without a known exhausted window use bounded retry backoff rather than invented reset times.
+
+**Codex:** uses the existing bounded usage checker when selecting candidates, with a 60-second cache;
+normal healthy messages do not scan every account.
+
+Sanitized observations and failure deadlines are stored under `~/.pi/agent/multi-pass-quota/`.
+Per-writer shards merge by observation/failure identity across conversations; no raw headers, error
+bodies, credentials, prompts, or email addresses are stored. Files are private and old shards expire
+after 14 days. Credentials lacking a stable account ID invalidate their cache when rotated/replaced;
+one ordinary response repopulates it. Disk failures fall back to session memory.
+
+See [PATCHES.md](PATCHES.md) for module boundaries, hooks, tests, and fork maintenance notes.
 
 ## Environment variable (optional)
 

@@ -12,7 +12,11 @@ Rules
 - **No `index.ts` in this directory.** pi treats `extensions/*/index.ts` as a separate
   extension entry point. Without one, pi ignores this folder entirely and these files are
   reached only through imports from `multi-sub.ts`.
-- One file per patch, named after its entry in `../../PATCHES.md`.
+- One feature per patch, documented in `../../PATCHES.md`. Use a small module family when
+  provider parsing, persistence, pure policy, and orchestration need independent contracts.
+- Quota routing: `anthropic-quota.ts` parses facts; `quota-state.ts` stores them;
+  `account-policy.ts` ranks accounts; `quota-routing.ts` coordinates selection. None owns
+  model preference: ordered pools/chains remain the source of truth.
 - All logic here; keep the touch on `multi-sub.ts` as small as possible so upstream rebases
   conflict rarely and trivially.
 - Import pi packages the same way `multi-sub.ts` does (`@earendil-works/pi-ai`, etc.).
