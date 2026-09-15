@@ -278,29 +278,3 @@ preserved, unsupported reports gaining no countdown, tool fields incl. clamped `
 no mutation of the source report. `scripts/test.sh` = 15 checks green.
 **Compat:** display-only. Nothing is written to `~/.pi/agent/multi-pass.json`, so unpatched upstream
 (and an older fork) behave exactly as before.
-
-### extra-usage-failover  ·  status: local
-**Why:** Anthropic's subscription wall — `400 invalid_request_error: "You're out of extra usage"` —
-is how a plan window being exhausted surfaces when the account has no extra-usage balance. It is
-returned with **no** `anthropic-ratelimit-unified-*` headers, so `quota-aware-rotation` never
-observes a limited window, and the message matches none of `RATE_LIMIT_PATTERNS` (no "limit",
-"quota", "429"…), so `isRateLimitError()` says *not a rate limit*. Net effect on 2026-09-15: every
-Opus request in two pi-web-ui conversations 400'd against `anthropic-2` for hours while two other
-slots sat at <10% — `weekly-first` kept preferring the dead slot because it had the earliest weekly
-reset and its *account-scope* windows looked healthy (the exhausted window was the model-family
-`7d_oi` one, which `account-policy` doesn't consult).
-**Behavior:** the wall is classified as a rate-limit failure. That is the only change: the existing
-failover plan runs, `quotaRouter.failed()` records a `QuotaFailure` for that slot+model (retry
-backoff, or the observed reset if a ≥100% window is known), and the next candidate in the pool is
-tried. The harmless startup *notice* ("…draws from extra usage…") does not match — only the
-"out of" wall does. Unrelated 400s (empty content block, Claude-Code-version gate) are unaffected.
-Not addressed here, deliberately: teaching `account-policy` to read model-scope windows. That is a
-route-selection change with its own trade-offs; this patch only stops the retry-forever loop.
-**Hooks in `extensions/multi-sub.ts`:** one added entry in `RATE_LIMIT_PATTERNS` (consumed by
-`isRateLimitError`, which gates `handleRateLimitError` → `quotaRouter.failed`).
-**Files:** `tests/extra-usage-failover-check.mjs`; touched `extensions/multi-sub.ts`.
-**Test:** `node tests/extra-usage-failover-check.mjs` — evaluates the real `RATE_LIMIT_PATTERNS`
-array out of the source (not a copy): the verbatim production error body, case variants, the
-startup notice as a required *non*-match, two unrelated 400s as non-matches, and upstream's
-429/overloaded/500 behaviour preserved. Fails on the pre-patch source. `scripts/test.sh` = 16 green.
-**Compat:** pure classifier widening; no config or state format change.

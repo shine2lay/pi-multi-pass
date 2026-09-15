@@ -2170,11 +2170,6 @@ const RATE_LIMIT_PATTERNS = [
 	/capacity/i,
 	/429/,
 	/quota/i,
-	// Anthropic subscription wall: a plan window (often a model-family one the
-	// account-scope windows don't show) is exhausted AND the account has no
-	// extra-usage balance. Arrives as HTTP 400 invalid_request_error with no
-	// ratelimit headers, so without this pattern it never fails over.
-	/out of extra usage/i,
 ];
 
 function isRateLimitError(errorMessage: string): boolean {
