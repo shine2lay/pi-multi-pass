@@ -12,6 +12,7 @@ import * as anthropic from "../extensions/mine/anthropic-quota.ts";
 import * as limits from "../extensions/mine/current-model-limits.ts";
 import * as reset from "../extensions/mine/reset-first.ts";
 import * as fallback from "../extensions/mine/model-fallback.ts";
+import * as countdown from "../extensions/mine/reset-countdown.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = fs.mkdtempSync(path.join(tmpdir(), "pi-quota-routing-"));
@@ -181,7 +182,7 @@ try {
     registerTool: tool => tools.set(tool.name, tool), sendUserMessage: text => replay.push(text),
     setModel: async next => { const previousModel = model; model = next; chosen.push(next.provider); await emit("model_select", { model, previousModel, source: "set" }); return true; } };
   const production = runInNewContext(`${executable}\n;({multiSub});`, {
-    ...fs, ...path, ...qs, ...policy, ...routing, ...anthropic, ...limits, ...reset, ...fallback,
+    ...fs, ...path, ...qs, ...policy, ...routing, ...anthropic, ...limits, ...reset, ...fallback, ...countdown,
     Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
     builtinProviders: () => [], getModels: () => ["model-alpha", "model-beta", "model-gamma"].map(id => ({ id })),
     process: { env: {} }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,

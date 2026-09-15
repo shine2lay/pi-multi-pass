@@ -96,6 +96,7 @@ import {
 	formatModelLimits,
 	type ModelLimitsData,
 } from "./mine/current-model-limits.ts";
+import { withResetCountdown } from "./mine/reset-countdown.ts";
 import { parseAnthropicQuotaHeaders, anthropicModelLimits } from "./mine/anthropic-quota.ts";
 import { QuotaStateStore, quotaAccountKey, type QuotaWindow } from "./mine/quota-state.ts";
 import { usesQuotaRouting, type QuotaRoutingConfig } from "./mine/account-policy.ts";
@@ -6148,7 +6149,9 @@ export default function multiSub(pi: ExtensionAPI) {
 		promptSnippet: "Check the current model/account's remaining subscription quota and reset times",
 		parameters: Type.Object({ refresh: Type.Optional(Type.Boolean({ description: "Fetch queryable quota (default true), or read the latest passive Anthropic observation. False allows a 60-second query cache. Never sends model probes." })) }),
 		async execute(_toolCallId, { refresh = true }, signal, _onUpdate, ctx) {
-			const report = await poolManager.getCurrentModelLimits(ctx, refresh, signal);
+			// mine/reset-countdown:每个窗口带上 "resetsIn" / "resetsInSeconds"，
+			// 免得调用方自己拿 UTC 时间戳去减当前时间。
+			const report = withResetCountdown(await poolManager.getCurrentModelLimits(ctx, refresh, signal));
 			return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], details: report };
 		},
 	});

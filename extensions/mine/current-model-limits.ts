@@ -1,4 +1,5 @@
 import type { ResetUsage } from "./reset-first.ts";
+import { formatResetPhrase } from "./reset-countdown.ts";
 
 export interface LimitWindow {
 	name: string;
@@ -66,17 +67,24 @@ export function unavailableLimits(note: string, unsupported = false): ModelLimit
 	return { status: unsupported ? "unsupported" : "unavailable", scope: "unknown", windows: [], note };
 }
 
-/** Compact, explicitly scoped footer. Full UTC times and observation time are available through the tool. */
-export function formatModelLimits(report: ModelLimitsReport): string {
-	const label = report.model ?? report.provider ?? "no model";
+/** Compact, explicitly scoped footer. Full UTC times and observation time are available through the tool.
+ *  `now` is injectable so the reset countdown is testable without touching the clock. */
+export function formatModelLimits(report: ModelLimitsReport, now = Date.now()): string {
+	// The quota belongs to the SUBSCRIPTION, not to whatever model is selected right now, so the
+	// footer is labeled with the provider slot ("anthropic-3", "codex"). The only model-specific
+	// thing here is a per-model-family window, which names the model on that window alone (below).
+	const label = report.provider ?? report.model ?? "no provider";
 	if (report.status !== "available") return `${label}: limits unavailable`;
 	if (report.scope === "provider-model-buckets") {
 		return `${label}: ${report.windows.length + (report.omittedWindows ?? 0)} quota buckets (use current_model_limits)`;
 	}
 	const windows = report.windows.map((w) => {
 		const left = w.remainingPercent === undefined ? "?" : `${Math.round(w.remainingPercent)}%`;
-		const when = w.resetAt ? `${w.resetAt.slice(5, 10)} ${w.resetAt.slice(11, 16)}Z` : "unknown";
-		return `${w.name} ${left} left, reset ${when}`;
+		// Relative first ("resets in 4d 15h"), absolute UTC kept right next to it.
+		const when = w.resetAt ? `${w.resetAt.slice(5, 10)} ${w.resetAt.slice(11, 16)}Z` : undefined;
+		// A model-scoped window (e.g. an Opus-only cap) is the one place a model id is meaningful.
+		const name = w.scope === "model" && report.model ? `${report.model} ${w.name}` : w.name;
+		return `${name} ${left} left, ${formatResetPhrase(w.resetAt, when, now)}`;
 	});
 	const scope = report.scope === "account-and-model" ? "account + model" : "account";
 	const observation = report.source === "Anthropic OAuth response headers" ? " | observed" : "";

@@ -1,4 +1,6 @@
 /** Reset-aware account selection. Pure quota data only; credentials stay in the host checker. */
+import { formatResetPhrase } from "./reset-countdown.ts";
+
 export interface ResetFirstConfig {
 	models: string[];
 	window?: "weekly" | "five-hour" | "next";
@@ -126,12 +128,13 @@ export function rankResetAccounts(
 	});
 }
 
-function windowSummary(label: string, window?: UsageWindow): string {
+function windowSummary(label: string, window?: UsageWindow, now = Date.now()): string {
 	if (!window) return `${label} not reported`;
 	const remaining = Math.max(0, 100 - window.usedPercent);
 	const date = window.resetAt === undefined ? undefined : new Date(window.resetAt * 1000);
-	const when = date && Number.isFinite(date.getTime()) ? date.toISOString() : "unknown";
-	return `${label} ${Math.round(remaining)}% left, resets ${when}`;
+	const when = date && Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+	// Same countdown as the footer: "resets in 4d 15h (<full UTC stamp>)".
+	return `${label} ${Math.round(remaining)}% left, ${formatResetPhrase(window.resetAt, when, now)}`;
 }
 
 /** Each checker has a deadline, including credential refresh. Abort-safe even if a checker ignores its signal. */

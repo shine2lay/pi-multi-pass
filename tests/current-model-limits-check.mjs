@@ -30,7 +30,11 @@ assert.equal(report.cached, false);
 assert.equal(report.provider, current.provider);
 assert.equal(report.model, current.id);
 assert.ok(Number.isFinite(Date.parse(report.checkedAt)));
-assert.match(formatModelLimits(report), /7d 63% left, reset 09-19 11:13Z/);
+// reset-countdown: countdown first, absolute UTC stamp kept right next to it.
+assert.match(
+  formatModelLimits(report, Date.parse("2026-09-14T20:00:00.000Z")),
+  /7d 63% left, resets in 4d 15h \(09-19 11:13Z\)/,
+);
 report = await cache.get(current, check);
 assert.equal(report.cached, true);
 assert.equal(checks, 1);
