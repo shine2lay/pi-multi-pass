@@ -53,3 +53,21 @@ assert.match(block.split("\n")[0], /^subs \(3\) · checked 20:00Z$/);
 assert.equal(formatSubsStatus([], now), "subs: none configured");
 
 console.log("subs-status-check: ok");
+
+/* --- 回归：纯 Anthropic 的池子也必须列出账号 ---------------------------- *
+ * 之前 /subs limit-status 报「Checked 0 subscription(s)」：账号枚举走的是
+ * collectQuotaAccounts()，它只列「有 quota checker 的 provider」（Codex / Google）。
+ * Anthropic 订阅没有可查接口（额度只在正常响应的响应头里），于是纯 Anthropic 的
+ * 配置得到零个账号。全景视图必须把它们也列出来 —— 查不到就用观测值/老实说没数据。 */
+import { readFileSync } from "node:fs";
+const src = readFileSync(new URL("../extensions/multi-sub.ts", import.meta.url), "utf8");
+assert.match(src, /function collectAllSubAccounts\(/, "需要一个不按 checker 过滤的账号枚举器");
+assert.match(
+  src.slice(src.indexOf("async refreshAllSubsStatus")),
+  /collectAllSubAccounts\(ctx\)/,
+  "全景刷新必须用它，而不是只列可查 provider 的 collectQuotaAccounts",
+);
+const enumerator = src.slice(src.indexOf("function collectAllSubAccounts("), src.indexOf("const codexQuotaChecker"));
+assert.ok(!/PROVIDER_QUOTA_CHECKERS/.test(enumerator), "枚举器不得再按 checker 过滤");
+assert.match(enumerator, /normalizeQuotaAllowedProviderNames/, "项目级 provider 限制仍要生效");
+console.log("subs-status-check: anthropic-only 枚举回归 ok");

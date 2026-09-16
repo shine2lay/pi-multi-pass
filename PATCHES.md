@@ -295,8 +295,12 @@ response headers) is shown with its observation age. An account never observed p
 `no data yet — send one message on this account`; it is never rendered as `0%`, because
 "not observed" and "exhausted" are opposite facts. Refreshed **only** on that command — no polling,
 no background probes, nothing spent to draw a box.
-**Hooks in `extensions/multi-sub.ts`:** `PoolManager.refreshAllSubsStatus()` (reuses the existing
-`collectQuotaAccounts` / `runQuotaChecks` and the shared quota-state observations); the `/subs`
+**Hooks in `extensions/multi-sub.ts`:** `PoolManager.refreshAllSubsStatus()` plus its own
+`collectAllSubAccounts()`. The existing `collectQuotaAccounts()` only enumerates providers that have
+a quota checker (Codex / Google), so an Anthropic-only setup produced *zero* accounts
+("Checked 0 subscription(s)"); the panoramic view must list every configured subscription and fall
+back to observations for the ones with no queryable endpoint. Project-level provider restrictions
+still apply. Quota itself still comes from `runQuotaChecks` and the shared quota-state observations; the `/subs`
 handler gains the three subcommand spellings and the completion list gains `limit-status`.
 **Files:** `extensions/mine/subs-status.ts`, `tests/subs-status-check.mjs`
 **Test:** `node tests/subs-status-check.mjs` — window/age formatting incl. Unix-seconds input,

@@ -1388,6 +1388,44 @@ function collectQuotaAccounts(ctx: ExtensionContext): QuotaAccount[] {
 	return accounts;
 }
 
+/**
+ * mine/subs-status：枚举**所有**配置的订阅账号。
+ *
+ * 与 `collectQuotaAccounts()` 的区别很关键：那个只列「有 quota checker 的
+ * baseProvider」（Codex / Google），因为它服务的是「现查」的交互式选单。Anthropic
+ * 订阅没有可查接口（额度只写在正常响应的响应头里），于是纯 Anthropic 的池子在那里
+ * 会得到**零个账号** —— 也就是「Checked 0 subscription(s)」的由来。
+ *
+ * 全景视图必须把它们都列出来：能查的现查，不能查的用被动观测，没观测过的老实说
+ * 「还没有数据」。项目级 provider 限制仍然生效（与上面同一套口径）。
+ */
+function collectAllSubAccounts(ctx: ExtensionContext): QuotaAccount[] {
+	const allSubs = normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()));
+	const allowedProviderNames = normalizeQuotaAllowedProviderNames(ctx.cwd);
+	const allowed = allowedProviderNames ? new Set(allowedProviderNames) : undefined;
+	const auth = getAuthStorage(ctx);
+	const seen = new Set<string>();
+	const accounts: QuotaAccount[] = [];
+	const push = (providerName: string, displayName: string) => {
+		if (allowed && !allowed.has(providerName)) return;
+		if (seen.has(providerName)) return;
+		seen.add(providerName);
+		accounts.push({
+			providerName,
+			baseProvider: getBaseProvider(providerName) || providerName,
+			displayName,
+			auth: auth.get(providerName) as AuthStorageEntry | undefined,
+		});
+	};
+	// 基座 provider（未编号的那个，如 `anthropic`）：登录过就算一个账号。
+	for (const base of new Set(allSubs.map((e) => e.provider))) {
+		if (auth.hasAuth(base)) push(base, PROVIDER_TEMPLATES[base]?.displayName || base);
+	}
+	// 再加上 /subs 里配置的每一个编号账号。
+	for (const entry of allSubs) push(subProviderName(entry), subDisplayName(entry));
+	return accounts;
+}
+
 const codexQuotaChecker: ProviderQuotaChecker = {
 	baseProvider: "openai-codex",
 	async check(account: QuotaAccount, signal?: AbortSignal): Promise<QuotaCheckResult> {
@@ -2884,7 +2922,7 @@ class PoolManager {
 	 * 就写 no data yet，绝不把「没观测到」显示成 0%。
 	 */
 	async refreshAllSubsStatus(ctx: ExtensionContext, signal = ctx.signal): Promise<SubStatus[]> {
-		const accounts = collectQuotaAccounts(ctx);
+		const accounts = collectAllSubAccounts(ctx);
 		const labels = new Map<string, string>();
 		for (const entry of normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()))) {
 			if (entry.label) labels.set(subProviderName(entry), entry.label);
