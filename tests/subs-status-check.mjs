@@ -71,3 +71,21 @@ const enumerator = src.slice(src.indexOf("function collectAllSubAccounts("), src
 assert.ok(!/PROVIDER_QUOTA_CHECKERS/.test(enumerator), "枚举器不得再按 checker 过滤");
 assert.match(enumerator, /normalizeQuotaAllowedProviderNames/, "项目级 provider 限制仍要生效");
 console.log("subs-status-check: anthropic-only 枚举回归 ok");
+
+/* --- 「变成已知」就跟着更新（与底栏同时机，但不花钱） ------------------- */
+const s2 = readFileSync(new URL("../extensions/multi-sub.ts", import.meta.url), "utf8");
+const auto = s2.slice(s2.indexOf("async refreshSubsStatusIfShown"), s2.indexOf("async refreshAllSubsStatus"));
+assert.match(auto, /if \(!this\.subsStatusShown\) return;/, "用户没打开过全景就不要自作主张弹框");
+assert.match(auto, /\{ query: false \}/, "自动刷新只读已有观测：不查询、不探针、不花额度");
+// 三个时机都要接上：观测到新额度头 / 切模型账号 / 一轮跑完
+assert.ok(
+  s2.includes("if (windows.length) await this.refreshSubsStatusIfShown(ctx);"),
+  "观测到新的额度头时更新",
+);
+const modelSelect = s2.slice(s2.indexOf('pi.on("model_select"'), s2.indexOf('pi.on("session_shutdown"'));
+assert.match(modelSelect, /refreshSubsStatusIfShown/, "切模型/账号时更新（与 getCurrentModelLimits 同处）");
+const agentEnd = s2.slice(s2.lastIndexOf('pi.on("agent_end"'));
+assert.match(agentEnd.slice(0, 300), /refreshSubsStatusIfShown/, "一轮跑完时更新");
+// 自动刷新绝不能顺手探针
+assert.ok(!/refreshSubsStatusIfShown[\s\S]{0,400}probe: true/.test(s2), "自动路径不得开启探针");
+console.log("subs-status-check: 自动更新时机 ok");

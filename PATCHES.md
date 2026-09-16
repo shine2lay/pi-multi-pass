@@ -293,8 +293,12 @@ Two data sources, always distinguished in the text: directly queryable quota (Co
 reported fresh, while passively observed quota (Anthropic subscription limits ride on normal
 response headers) is shown with its observation age. An account never observed prints
 `no data yet — send one message on this account`; it is never rendered as `0%`, because
-"not observed" and "exhausted" are opposite facts. Refreshed **only** on that command — no polling,
-no background probes, nothing spent to draw a box.
+"not observed" and "exhausted" are opposite facts. Refreshed on that command, and then **kept current for free**: once you have opened the panorama in
+a session, it also refreshes at the same moments the bottom box does — model/account switch,
+end of a run, and the instant a fresh quota header is observed — but in read-only mode
+(`query: false`): no usage queries, no probes, nothing spent. That is what turns an account from
+`no data yet` into real numbers just by using it. Before you have ever opened it, nothing is
+published at all — no box appears uninvited, and no polling ever happens.
 **Hooks in `extensions/multi-sub.ts`:** `PoolManager.refreshAllSubsStatus()` plus its own
 `collectAllSubAccounts()`. The existing `collectQuotaAccounts()` only enumerates providers that have
 a quota checker (Codex / Google), so an Anthropic-only setup produced *zero* accounts

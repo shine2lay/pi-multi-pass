@@ -2822,6 +2822,8 @@ class PoolManager {
 		if (windows.length && ctx.model?.provider === request.provider && ctx.model.id === request.modelId) {
 			await this.getCurrentModelLimits(ctx);
 		}
+		// 这条账号的额度刚刚「变成已知」——全景框跟着更新（免费：只读刚写进去的观测）。
+		if (windows.length) await this.refreshSubsStatusIfShown(ctx);
 	}
 
 	private quotaRoutingHost(ctx: ExtensionContext): QuotaRoutingHost {
@@ -2922,18 +2924,40 @@ class PoolManager {
 	 * （Anthropic 订阅额度写在正常响应头里）用最近一次观测并标出时间；没有观测过
 	 * 就写 no data yet，绝不把「没观测到」显示成 0%。
 	 */
+	/** 用户这次会话里要过全景（/subs limit-status）吗？没要过就不要自作主张弹框。 */
+	private subsStatusShown = false;
+
+	/**
+	 * 额度「变成已知」时顺手更新全景框 —— 与底栏 multi-pass-limits 同样的时机
+	 * （切模型 / 切账号 / 一轮跑完 / 观测到新的额度头），但**只读已有数据**：
+	 * 不查询、不探针、不花任何额度。用户没打开过全景就什么也不做。
+	 */
+	async refreshSubsStatusIfShown(ctx: ExtensionContext): Promise<void> {
+		if (!this.subsStatusShown) return;
+		try {
+			await this.refreshAllSubsStatus(ctx, { query: false });
+		} catch {
+			// 顺手更新而已，失败不该影响正事
+		}
+	}
+
 	async refreshAllSubsStatus(
 		ctx: ExtensionContext,
-		options: { probe?: boolean; signal?: AbortSignal } = {},
+		options: { probe?: boolean; query?: boolean; signal?: AbortSignal } = {},
 	): Promise<SubStatus[]> {
 		const signal = options.signal ?? ctx.signal;
+		// 自动刷新（query:false）只读已有观测/缓存：额度一旦「变成已知」就顺手更新这个框，
+		// 但绝不因此发请求——否则每轮 agent_end 都会对 Codex 打一次 usage 接口。
+		this.subsStatusShown = true;
 		const accounts = collectAllSubAccounts(ctx);
 		const labels = new Map<string, string>();
 		for (const entry of normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()))) {
 			if (entry.label) labels.set(subProviderName(entry), entry.label);
 		}
 
-		const results = await runQuotaChecks(accounts, signal).catch(() => [] as QuotaCheckResult[]);
+		const results = options.query === false
+			? ([] as QuotaCheckResult[])
+			: await runQuotaChecks(accounts, signal).catch(() => [] as QuotaCheckResult[]);
 		const byProvider = new Map(results.map((r) => [r.account.providerName, r]));
 
 		const subs: SubStatus[] = accounts.map((account) => {
@@ -6214,6 +6238,8 @@ export default function multiSub(pi: ExtensionAPI) {
 		await enforceProjectRestriction(ctx, "session");
 		await poolManager.selectResetFirst(ctx);
 		await poolManager.getCurrentModelLimits(ctx);
+		// 切了模型/账号 → 全景框也跟着刷新（与底栏同一时机，只读已有观测）。
+		await poolManager.refreshSubsStatusIfShown(ctx);
 	});
 
 	pi.on("model_select", async (event, ctx) => {
@@ -6221,6 +6247,8 @@ export default function multiSub(pi: ExtensionAPI) {
 		await enforceProjectRestriction(ctx, "model");
 		await poolManager.selectResetFirst(ctx);
 		await poolManager.getCurrentModelLimits(ctx);
+		// 切了模型/账号 → 全景框跟着刷新（与底栏同一时机，只读已有观测，不花额度）。
+		await poolManager.refreshSubsStatusIfShown(ctx);
 	});
 
 	pi.on("session_shutdown", () => poolManager.cancelResetSelection());
@@ -6297,7 +6325,10 @@ export default function multiSub(pi: ExtensionAPI) {
 	});
 
 	// Quota snapshots are refreshed after runs (60-second cache), never by background polling.
-	pi.on("agent_end", async (_event, ctx) => { await poolManager.getCurrentModelLimits(ctx); });
+	pi.on("agent_end", async (_event, ctx) => {
+		await poolManager.getCurrentModelLimits(ctx);
+		await poolManager.refreshSubsStatusIfShown(ctx);
+	});
 	pi.registerTool({
 		name: "current_model_limits",
 		label: "Current Model Limits",
