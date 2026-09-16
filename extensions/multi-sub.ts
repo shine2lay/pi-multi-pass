@@ -97,6 +97,7 @@ import {
 	type ModelLimitsData,
 } from "./mine/current-model-limits.ts";
 import { withResetCountdown } from "./mine/reset-countdown.ts";
+import { formatSubsStatus, type SubStatus, type SubWindow } from "./mine/subs-status.ts";
 import { parseAnthropicQuotaHeaders, anthropicModelLimits } from "./mine/anthropic-quota.ts";
 import { QuotaStateStore, quotaAccountKey, type QuotaWindow } from "./mine/quota-state.ts";
 import { usesQuotaRouting, type QuotaRoutingConfig } from "./mine/account-policy.ts";
@@ -2871,6 +2872,59 @@ class PoolManager {
 		this.resetFirst.cancel();
 		this.limitsGeneration++;
 		this.modelLimits.cancel();
+	}
+
+	/**
+	 * mine/subs-status：把**所有订阅**的余量查一遍，发布到独立状态框
+	 * `multi-pass-subs`（与「当前账号」的 multi-pass-limits 并存，互不覆盖）。
+	 *
+	 * 只在用户显式执行 `/subs limit-status` 时跑 —— 查一次是有代价的，不做自动轮询。
+	 * 两类数据源分开标注：能直接查的（Codex usage）标 live；只能被动观测的
+	 * （Anthropic 订阅额度写在正常响应头里）用最近一次观测并标出时间；没有观测过
+	 * 就写 no data yet，绝不把「没观测到」显示成 0%。
+	 */
+	async refreshAllSubsStatus(ctx: ExtensionContext, signal = ctx.signal): Promise<SubStatus[]> {
+		const accounts = collectQuotaAccounts(ctx);
+		const labels = new Map<string, string>();
+		for (const entry of normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()))) {
+			if (entry.label) labels.set(subProviderName(entry), entry.label);
+		}
+
+		const results = await runQuotaChecks(accounts, signal).catch(() => [] as QuotaCheckResult[]);
+		const byProvider = new Map(results.map((r) => [r.account.providerName, r]));
+
+		const subs: SubStatus[] = accounts.map((account) => {
+			const label = labels.get(account.providerName);
+			const live = byProvider.get(account.providerName);
+			if (live?.resetUsage) {
+				const windows: SubWindow[] = [];
+				for (const [name, w] of [["5h", live.resetUsage.fiveHour], ["7d", live.resetUsage.weekly]] as const) {
+					if (w) windows.push({ name, remainingPercent: Math.max(0, 100 - w.usedPercent), resetAt: w.resetAt });
+				}
+				return { provider: account.providerName, label, source: "live", windows, limited: live.resetUsage.limited };
+			}
+			// 被动观测（Anthropic 订阅）：读共享的 quota-state，不发任何请求。
+			const state = this.quotaRouter.state(this.quotaKey(ctx, account.providerName));
+			const windows: SubWindow[] = (state.windows ?? []).map((w) => ({
+				name: w.name,
+				remainingPercent: w.usedPercent === undefined ? undefined : Math.max(0, 100 - w.usedPercent),
+				resetAt: w.resetAt,
+			}));
+			if (windows.length === 0) {
+				return {
+					provider: account.providerName,
+					label,
+					source: "unknown",
+					windows: [],
+					note: live?.summary ?? "no data yet — send one message on this account",
+				};
+			}
+			const observedAt = Math.max(...(state.windows ?? []).map((w) => w.observedAt ?? 0));
+			return { provider: account.providerName, label, source: "observed", observedAt, windows };
+		});
+
+		if (!signal?.aborted) ctx.ui.setStatus("multi-pass-subs", formatSubsStatus(subs));
+		return subs;
 	}
 
 	async getCurrentModelLimits(ctx: ExtensionContext, refresh = false, signal = ctx.signal) {
@@ -6160,7 +6214,7 @@ export default function multiSub(pi: ExtensionAPI) {
 	pi.registerCommand("subs", {
 		description: "Manage extra OAuth subscriptions",
 		getArgumentCompletions: (prefix: string) => {
-			const subcommands = ["list", "add", "remove", "login", "logout", "switch", "status", "limits"];
+			const subcommands = ["list", "add", "remove", "login", "logout", "switch", "status", "limits", "limit-status"];
 			const filtered = subcommands.filter((s) => s.startsWith(prefix));
 			return filtered.length > 0
 				? filtered.map((s) => ({ value: s, label: s }))
@@ -6195,6 +6249,19 @@ export default function multiSub(pi: ExtensionAPI) {
 				case "quota":
 				case "usage":
 					return handleSubsLimits(ctx);
+				// mine/subs-status：一次查完**所有订阅**并写进右下角状态框
+				// （与「当前账号」的 multi-pass-limits 并存）。只在这里刷新，不自动轮询。
+				case "limit-status":
+				case "limit-check":
+				case "status-all": {
+					const subs = await poolManager.refreshAllSubsStatus(ctx);
+					const checked = subs.filter((x) => x.source !== "unknown").length;
+					ctx.ui.notify(
+						`Checked ${subs.length} subscription(s); ${checked} reported quota. See the multi-pass-subs box.`,
+						"info",
+					);
+					return;
+				}
 				default:
 					return handleSubsMenu(pi, ctx, poolManager);
 			}

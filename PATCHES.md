@@ -278,3 +278,29 @@ preserved, unsupported reports gaining no countdown, tool fields incl. clamped `
 no mutation of the source report. `scripts/test.sh` = 15 checks green.
 **Compat:** display-only. Nothing is written to `~/.pi/agent/multi-pass.json`, so unpatched upstream
 (and an older fork) behave exactly as before.
+
+### subs-status  ·  status: local
+**Why:** the footer only answers "how much is left on the account I'm using right now"
+(`multi-pass-limits`). With several subscriptions in a pool the more useful question is
+"how much is left *everywhere*, and who should I switch to" — and there was no way to see that
+without walking the interactive `/subs limits` picker one account at a time.
+**Behavior:** `/subs limit-status` (aliases `limit-check`, `status-all`) checks every configured
+subscription once and publishes a separate status entry, `multi-pass-subs`, so it sits in its own
+box beside the existing current-account one instead of overwriting it. One line per subscription:
+provider slot + your label, each window as `7d 61% (in 3d 15h)`, ordered so the **soonest-expiring
+allowance comes first** (same preference as `weekly-first` routing) with limited accounts last.
+Two data sources, always distinguished in the text: directly queryable quota (Codex usage) is
+reported fresh, while passively observed quota (Anthropic subscription limits ride on normal
+response headers) is shown with its observation age. An account never observed prints
+`no data yet — send one message on this account`; it is never rendered as `0%`, because
+"not observed" and "exhausted" are opposite facts. Refreshed **only** on that command — no polling,
+no background probes, nothing spent to draw a box.
+**Hooks in `extensions/multi-sub.ts`:** `PoolManager.refreshAllSubsStatus()` (reuses the existing
+`collectQuotaAccounts` / `runQuotaChecks` and the shared quota-state observations); the `/subs`
+handler gains the three subcommand spellings and the completion list gains `limit-status`.
+**Files:** `extensions/mine/subs-status.ts`, `tests/subs-status-check.mjs`
+**Test:** `node tests/subs-status-check.mjs` — window/age formatting incl. Unix-seconds input,
+`?` instead of a fabricated `0%`, observation age labelling, limited marker, ordering
+(soonest reset first, limited last), header, empty config. `scripts/test.sh` = 16 checks green.
+**Compat:** display-only; no config or schema change. Removing the patch removes only the extra
+box and the subcommand.
