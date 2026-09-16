@@ -98,6 +98,7 @@ import {
 } from "./mine/current-model-limits.ts";
 import { withResetCountdown } from "./mine/reset-countdown.ts";
 import { formatSubsStatus, type SubStatus, type SubWindow } from "./mine/subs-status.ts";
+import { probeAnthropicQuota } from "./mine/anthropic-probe.ts";
 import { parseAnthropicQuotaHeaders, anthropicModelLimits } from "./mine/anthropic-quota.ts";
 import { QuotaStateStore, quotaAccountKey, type QuotaWindow } from "./mine/quota-state.ts";
 import { usesQuotaRouting, type QuotaRoutingConfig } from "./mine/account-policy.ts";
@@ -2921,7 +2922,11 @@ class PoolManager {
 	 * （Anthropic 订阅额度写在正常响应头里）用最近一次观测并标出时间；没有观测过
 	 * 就写 no data yet，绝不把「没观测到」显示成 0%。
 	 */
-	async refreshAllSubsStatus(ctx: ExtensionContext, signal = ctx.signal): Promise<SubStatus[]> {
+	async refreshAllSubsStatus(
+		ctx: ExtensionContext,
+		options: { probe?: boolean; signal?: AbortSignal } = {},
+	): Promise<SubStatus[]> {
+		const signal = options.signal ?? ctx.signal;
 		const accounts = collectAllSubAccounts(ctx);
 		const labels = new Map<string, string>();
 		for (const entry of normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()))) {
@@ -2941,11 +2946,17 @@ class PoolManager {
 				}
 				return { provider: account.providerName, label, source: "live", windows, limited: live.resetUsage.limited };
 			}
-			// 被动观测（Anthropic 订阅）：读共享的 quota-state，不发任何请求。
-			const state = this.quotaRouter.state(this.quotaKey(ctx, account.providerName));
-			const windows: SubWindow[] = (state.windows ?? []).map((w) => ({
+			// --probe：没有任何观测数据时，发一次最小请求把额度头问出来
+			// （max_tokens: 1，见 mine/anthropic-probe.ts）。默认不做——默默花钱不行。
+			// 已有观测的账号不探：那点额度不值得为一个已经知道的数字再花一次。
+			// Anthropic 订阅：走**与 multi-pass-limits 完全同一条代码路径**
+			// （anthropicModelLimits 读共享 quota-state），保证两个框不会给出互相矛盾
+			// 的数字；差别只在这里遍历所有账号，而那边只看当前账号。
+			const key = this.quotaKey(ctx, account.providerName);
+			const report = anthropicModelLimits(this.quotaRouter.state(key), account.providerName, ctx.model?.id ?? "");
+			const windows: SubWindow[] = report.windows.map((w) => ({
 				name: w.name,
-				remainingPercent: w.usedPercent === undefined ? undefined : Math.max(0, 100 - w.usedPercent),
+				remainingPercent: w.remainingPercent,
 				resetAt: w.resetAt,
 			}));
 			if (windows.length === 0) {
@@ -2954,15 +2965,68 @@ class PoolManager {
 					label,
 					source: "unknown",
 					windows: [],
-					note: live?.summary ?? "no data yet — send one message on this account",
+					note: live?.summary ?? "no data yet",
 				};
 			}
-			const observedAt = Math.max(...(state.windows ?? []).map((w) => w.observedAt ?? 0));
-			return { provider: account.providerName, label, source: "observed", observedAt, windows };
+			const observedAt = report.checkedAt ? Date.parse(report.checkedAt) : undefined;
+			return {
+				provider: account.providerName,
+				label,
+				source: "observed",
+				observedAt: Number.isFinite(observedAt) ? observedAt : undefined,
+				windows,
+				limited: report.limited,
+			};
 		});
 
+		if (options.probe) await this.probeMissingSubs(ctx, accounts, subs, signal);
 		if (!signal?.aborted) ctx.ui.setStatus("multi-pass-subs", formatSubsStatus(subs));
 		return subs;
+	}
+
+	/** `--probe`：对**没有观测数据**的 Anthropic 账号各发一次最小请求，把额度头问出来。
+	 *  逐个串行（不想在一瞬间对同一个订阅打并发），单个失败只影响那一行。 */
+	private async probeMissingSubs(
+		ctx: ExtensionContext,
+		accounts: QuotaAccount[],
+		subs: SubStatus[],
+		signal?: AbortSignal,
+	): Promise<void> {
+		const model = ctx.model?.id || "claude-haiku-4-5";
+		for (const sub of subs) {
+			if (signal?.aborted) return;
+			if (sub.source !== "unknown") continue;
+			const account = accounts.find((a) => a.providerName === sub.provider);
+			if (!account || getBaseProvider(account.providerName) !== "anthropic") continue;
+			const auth = account.auth;
+			const token = auth && auth.type === "oauth" && typeof auth.access === "string" ? auth.access : "";
+			if (!token) {
+				sub.note = "not logged in";
+				continue;
+			}
+			const outcome = await probeAnthropicQuota(token, model);
+			if (outcome.error || outcome.status === 0) {
+				sub.note = outcome.error ?? "probe failed";
+				continue;
+			}
+			const windows = parseAnthropicQuotaHeaders(outcome.headers, model);
+			if (windows.length === 0) {
+				// 拿到了响应却没有额度头：说清楚是「没报」，而不是「没额度」。
+				sub.note = `probed (HTTP ${outcome.status}) — no quota headers returned`;
+				continue;
+			}
+			// 记进共享 quota-state：另一个框（multi-pass-limits）与路由策略立刻同样受益。
+			this.quotaRouter.observe(this.quotaKey(ctx, account.providerName), windows);
+			sub.source = "live";
+			sub.observedAt = Date.now();
+			sub.limited = windows.some((w) => w.limited);
+			sub.windows = windows.map((w) => ({
+				name: w.name,
+				remainingPercent: w.usedPercent === undefined ? undefined : Math.max(0, 100 - w.usedPercent),
+				resetAt: w.resetAt,
+			}));
+			sub.note = undefined;
+		}
 	}
 
 	async getCurrentModelLimits(ctx: ExtensionContext, refresh = false, signal = ctx.signal) {
@@ -6292,7 +6356,10 @@ export default function multiSub(pi: ExtensionAPI) {
 				case "limit-status":
 				case "limit-check":
 				case "status-all": {
-					const subs = await poolManager.refreshAllSubsStatus(ctx);
+					// --probe：对还没有观测数据的账号各发一次最小请求（max_tokens: 1）。
+					// 不加就只用已有观测，一个字节都不花。
+					const probe = /(^|\s)--probe(\s|$)/.test(rest);
+					const subs = await poolManager.refreshAllSubsStatus(ctx, { probe });
 					const checked = subs.filter((x) => x.source !== "unknown").length;
 					ctx.ui.notify(
 						`Checked ${subs.length} subscription(s); ${checked} reported quota. See the multi-pass-subs box.`,

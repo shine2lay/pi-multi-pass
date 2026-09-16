@@ -302,7 +302,19 @@ a quota checker (Codex / Google), so an Anthropic-only setup produced *zero* acc
 back to observations for the ones with no queryable endpoint. Project-level provider restrictions
 still apply. Quota itself still comes from `runQuotaChecks` and the shared quota-state observations; the `/subs`
 handler gains the three subcommand spellings and the completion list gains `limit-status`.
-**Files:** `extensions/mine/subs-status.ts`, `tests/subs-status-check.mjs`
+**Anthropic:** the same code path as the current-account box — `anthropicModelLimits()` reading the
+shared quota-state — so the two boxes can never disagree; this one just walks every account instead
+of only the active one. Accounts never used have no observation, which is exactly when you most want
+a number, so `/subs limit-status --probe` sends **one minimal request per unobserved account**
+(`max_tokens: 1`, one-character prompt, no streaming) purely to harvest the quota response headers,
+then writes them into the shared quota-state so the other box and the router benefit immediately.
+Opt-in only — never on a bare `limit-status`, never in the background: spending quota to draw a box
+must be something you asked for. Accounts that already have observations are skipped, failures
+degrade to a per-line note (`probe failed` / `probe timed out` / `probed (HTTP 429) — no quota
+headers returned`), and only `anthropic-ratelimit-*` headers are kept — cookies and account
+identifiers from the response are never held in memory.
+**Files:** `extensions/mine/subs-status.ts`, `extensions/mine/anthropic-probe.ts`,
+`tests/subs-status-check.mjs`, `tests/anthropic-probe-check.mjs`
 **Test:** `node tests/subs-status-check.mjs` — window/age formatting incl. Unix-seconds input,
 `?` instead of a fabricated `0%`, observation age labelling, limited marker, ordering
 (soonest reset first, limited last), header, empty config. `scripts/test.sh` = 16 checks green.
