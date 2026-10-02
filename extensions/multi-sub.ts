@@ -97,8 +97,20 @@ import {
 	type ModelLimitsData,
 } from "./mine/current-model-limits.ts";
 import { withResetCountdown } from "./mine/reset-countdown.ts";
-import { formatSubsStatus, type SubStatus, type SubWindow } from "./mine/subs-status.ts";
-import { probeAnthropicQuota } from "./mine/anthropic-probe.ts";
+import {
+	LIMITS_FILE_NAME,
+	checkAllLimits,
+	formatLimitsText,
+	installLimitsApi,
+	limitsCheckSummary,
+	readLimitsReadings,
+	recordReplyLimits,
+	registerLimitsHost,
+	windowsFromChecker,
+	windowsFromQuotaHeaders,
+	type LimitsCredential,
+	type LimitsHost,
+} from "./mine/subs-limits.ts";
 import { parseAnthropicQuotaHeaders, anthropicModelLimits } from "./mine/anthropic-quota.ts";
 import { QuotaStateStore, quotaAccountKey, type QuotaWindow } from "./mine/quota-state.ts";
 import { usesQuotaRouting, type QuotaRoutingConfig } from "./mine/account-policy.ts";
@@ -437,11 +449,15 @@ interface QuotaCheckResult {
 	summary: string;
 	details: string[];
 	score: number;
+	/** mine/subs-limits: shown in the Limits box. */
+	plan?: string;
+	email?: string;
 }
 
 interface ProviderQuotaChecker {
 	baseProvider: string;
-	check(account: QuotaAccount, signal?: AbortSignal): Promise<QuotaCheckResult>;
+	/** mine/subs-limits: `fetchImpl` lets the limits check add its deadline and retry. */
+	check(account: QuotaAccount, signal?: AbortSignal, fetchImpl?: typeof fetch): Promise<QuotaCheckResult>;
 }
 
 interface CodexUsageWindow {
@@ -1389,47 +1405,43 @@ function collectQuotaAccounts(ctx: ExtensionContext): QuotaAccount[] {
 	return accounts;
 }
 
+/** mine/subs-limits: the shared readings file, in pi-multi-pass's own data folder. */
+function limitsFile(): string {
+	return join(getAgentDir(), "multi-pass-quota", LIMITS_FILE_NAME);
+}
+
 /**
- * mine/subs-status：枚举**所有**配置的订阅账号。
- *
- * 与 `collectQuotaAccounts()` 的区别很关键：那个只列「有 quota checker 的
- * baseProvider」（Codex / Google），因为它服务的是「现查」的交互式选单。Anthropic
- * 订阅没有可查接口（额度只写在正常响应的响应头里），于是纯 Anthropic 的池子在那里
- * 会得到**零个账号** —— 也就是「Checked 0 subscription(s)」的由来。
- *
- * 全景视图必须把它们都列出来：能查的现查，不能查的用被动观测，没观测过的老实说
- * 「还没有数据」。项目级 provider 限制仍然生效（与上面同一套口径）。
+ * mine/subs-limits: pi's side of the limits check (every signed-in account, not only the ones
+ * with a checker; see PATCHES.md). Sign-ins are read from pi's store and refreshed only by pi
+ * (`getProviderAuth`, the refresh pi runs before a request). No model, no project filter: every
+ * window and every chat must show the same readings.
  */
-function collectAllSubAccounts(ctx: ExtensionContext): QuotaAccount[] {
-	const allSubs = normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()));
-	const allowedProviderNames = normalizeQuotaAllowedProviderNames(ctx.cwd);
-	const allowed = allowedProviderNames ? new Set(allowedProviderNames) : undefined;
-	const auth = getAuthStorage(ctx);
-	const seen = new Set<string>();
-	const accounts: QuotaAccount[] = [];
-	const push = (providerName: string, displayName: string) => {
-		if (allowed && !allowed.has(providerName)) return;
-		if (seen.has(providerName)) return;
-		seen.add(providerName);
-		accounts.push({
-			providerName,
-			baseProvider: getBaseProvider(providerName) || providerName,
-			displayName,
-			auth: auth.get(providerName) as AuthStorageEntry | undefined,
-		});
+function limitsHost(registry: () => ExtensionContext["modelRegistry"] | undefined): LimitsHost {
+	return {
+		configured: () => normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()))
+			.map((entry) => ({ provider: subProviderName(entry), label: entry.label })),
+		bases: () => Object.keys(PROVIDER_TEMPLATES),
+		stored: (provider) => readStoredCredential(provider) as LimitsCredential | undefined,
+		refresh: async (provider) => registry()?.getProviderAuth(provider),
+		checkOther: async (provider, base, credential, fetchImpl, signal) => {
+			const checker = PROVIDER_QUOTA_CHECKERS.find((c) => c.baseProvider === base);
+			if (!checker) return undefined;
+			const result = await checker.check({
+				providerName: provider, baseProvider: base, displayName: provider,
+				auth: credential as AuthStorageEntry,
+			}, signal, fetchImpl as typeof fetch);
+			return {
+				kind: result.kind, windows: result.limits?.windows,
+				limited: result.limits?.limited ?? result.resetUsage?.limited,
+				plan: result.plan, email: result.email, summary: result.summary,
+			};
+		},
 	};
-	// 基座 provider（未编号的那个，如 `anthropic`）：登录过就算一个账号。
-	for (const base of new Set(allSubs.map((e) => e.provider))) {
-		if (auth.hasAuth(base)) push(base, PROVIDER_TEMPLATES[base]?.displayName || base);
-	}
-	// 再加上 /subs 里配置的每一个编号账号。
-	for (const entry of allSubs) push(subProviderName(entry), subDisplayName(entry));
-	return accounts;
 }
 
 const codexQuotaChecker: ProviderQuotaChecker = {
 	baseProvider: "openai-codex",
-	async check(account: QuotaAccount, signal?: AbortSignal): Promise<QuotaCheckResult> {
+	async check(account: QuotaAccount, signal?: AbortSignal, fetchImpl: typeof fetch = fetch): Promise<QuotaCheckResult> {
 		const auth = account.auth;
 		if (!auth || auth.type !== "oauth" || typeof auth.access !== "string" || auth.access.length === 0) {
 			return {
@@ -1461,7 +1473,7 @@ const codexQuotaChecker: ProviderQuotaChecker = {
 		}
 
 		try {
-			const response = await fetch(`${baseUrl}/wham/usage`, {
+			const response = await fetchImpl(`${baseUrl}/wham/usage`, {
 				method: "GET",
 				headers,
 				signal,
@@ -1520,6 +1532,8 @@ const codexQuotaChecker: ProviderQuotaChecker = {
 				score: classification.score,
 				resetUsage,
 				limits: codexModelLimits(resetUsage),
+				plan: snapshot.planType !== "unknown" ? snapshot.planType : undefined,
+				email: snapshot.email || undefined,
 			};
 		} catch (error: unknown) {
 			if (signal?.aborted || isAbortError(error)) throw error;
@@ -2796,6 +2810,8 @@ class PoolManager {
 
 	private rememberQuotaResult(ctx: ExtensionContext, provider: string, result: QuotaCheckResult): void {
 		if (result.limits) this.modelLimits.remember(provider, result.limits);
+		// mine/subs-limits: numbers this chat read anyway update the Limits box too (free).
+		try { recordReplyLimits(limitsFile(), provider, windowsFromChecker(result.limits?.windows)); } catch { /* side update */ }
 		if (!result.resetUsage) return;
 		const now = Date.now(), windows: QuotaWindow[] = [];
 		for (const [name, w] of [["5h", result.resetUsage.fiveHour], ["7d", result.resetUsage.weekly]] as const) {
@@ -2819,6 +2835,10 @@ class PoolManager {
 		if (!request || request.signal?.aborted || this.quotaKey(ctx, request.provider) !== request.key) return;
 		const windows = parseAnthropicQuotaHeaders(event.headers, request.modelId);
 		this.quotaRouter.observe(request.key, windows, event.status >= 200 && event.status < 300 ? request.modelId : undefined);
+		// mine/subs-limits: numbers seen in a reply update that account's row in the Limits box (free).
+		if (windows.length) {
+			try { recordReplyLimits(limitsFile(), request.provider, windowsFromQuotaHeaders(windows)); } catch { /* side update */ }
+		}
 		if (windows.length && ctx.model?.provider === request.provider && ctx.model.id === request.modelId) {
 			await this.getCurrentModelLimits(ctx);
 		}
@@ -2916,141 +2936,37 @@ class PoolManager {
 	}
 
 	/**
-	 * mine/subs-status：把**所有订阅**的余量查一遍，发布到独立状态框
-	 * `multi-pass-subs`（与「当前账号」的 multi-pass-limits 并存，互不覆盖）。
-	 *
-	 * 只在用户显式执行 `/subs limit-status` 时跑 —— 查一次是有代价的，不做自动轮询。
-	 * 两类数据源分开标注：能直接查的（Codex usage）标 live；只能被动观测的
-	 * （Anthropic 订阅额度写在正常响应头里）用最近一次观测并标出时间；没有观测过
-	 * 就写 no data yet，绝不把「没观测到」显示成 0%。
+	 * mine/subs-limits: every subscription's limits in the chat's `multi-pass-subs` box (beside the
+	 * current account's multi-pass-limits, which stays as it is). The same check and the same
+	 * readings file as pi-web-ui's Limits box: Claude accounts through Anthropic's free usage page,
+	 * the others through their checkers. Nothing is sent to a model; checks run only when asked.
 	 */
-	/** 用户这次会话里要过全景（/subs limit-status）吗？没要过就不要自作主张弹框。 */
+	/** Has this chat asked for the box (`/subs limit-check`)? Until then it stays hidden. */
 	private subsStatusShown = false;
 
 	/**
-	 * 额度「变成已知」时顺手更新全景框 —— 与底栏 multi-pass-limits 同样的时机
-	 * （切模型 / 切账号 / 一轮跑完 / 观测到新的额度头），但**只读已有数据**：
-	 * 不查询、不探针、不花任何额度。用户没打开过全景就什么也不做。
+	 * Re-show the box from the shared readings when they may have changed (model switch, end of a
+	 * run, a reply's numbers). Reads the file only: no checks, nothing spent.
 	 */
 	async refreshSubsStatusIfShown(ctx: ExtensionContext): Promise<void> {
 		if (!this.subsStatusShown) return;
 		try {
-			await this.refreshAllSubsStatus(ctx, { query: false });
+			ctx.ui.setStatus("multi-pass-subs",
+				formatLimitsText(readLimitsReadings(limitsFile()), { current: ctx.model?.provider }));
 		} catch {
-			// 顺手更新而已，失败不该影响正事
+			// a side update; never in the way
 		}
 	}
 
-	async refreshAllSubsStatus(
-		ctx: ExtensionContext,
-		options: { probe?: boolean; query?: boolean; signal?: AbortSignal } = {},
-	): Promise<SubStatus[]> {
-		const signal = options.signal ?? ctx.signal;
-		// 自动刷新（query:false）只读已有观测/缓存：额度一旦「变成已知」就顺手更新这个框，
-		// 但绝不因此发请求——否则每轮 agent_end 都会对 Codex 打一次 usage 接口。
+	/** `/subs limit-check`: check every account now (joins a check already running). */
+	async checkAllSubsLimits(ctx: ExtensionContext) {
 		this.subsStatusShown = true;
-		const accounts = collectAllSubAccounts(ctx);
-		const labels = new Map<string, string>();
-		for (const entry of normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()))) {
-			if (entry.label) labels.set(subProviderName(entry), entry.label);
+		const registry = ctx.modelRegistry;
+		const readings = await checkAllLimits(limitsHost(() => registry), { file: limitsFile() });
+		if (!ctx.signal?.aborted) {
+			ctx.ui.setStatus("multi-pass-subs", formatLimitsText(readings, { current: ctx.model?.provider }));
 		}
-
-		const results = options.query === false
-			? ([] as QuotaCheckResult[])
-			: await runQuotaChecks(accounts, signal).catch(() => [] as QuotaCheckResult[]);
-		const byProvider = new Map(results.map((r) => [r.account.providerName, r]));
-
-		const subs: SubStatus[] = accounts.map((account) => {
-			const label = labels.get(account.providerName);
-			const live = byProvider.get(account.providerName);
-			if (live?.resetUsage) {
-				const windows: SubWindow[] = [];
-				for (const [name, w] of [["5h", live.resetUsage.fiveHour], ["7d", live.resetUsage.weekly]] as const) {
-					if (w) windows.push({ name, remainingPercent: Math.max(0, 100 - w.usedPercent), resetAt: w.resetAt });
-				}
-				return { provider: account.providerName, label, source: "live", windows, limited: live.resetUsage.limited };
-			}
-			// --probe：没有任何观测数据时，发一次最小请求把额度头问出来
-			// （max_tokens: 1，见 mine/anthropic-probe.ts）。默认不做——默默花钱不行。
-			// 已有观测的账号不探：那点额度不值得为一个已经知道的数字再花一次。
-			// Anthropic 订阅：走**与 multi-pass-limits 完全同一条代码路径**
-			// （anthropicModelLimits 读共享 quota-state），保证两个框不会给出互相矛盾
-			// 的数字；差别只在这里遍历所有账号，而那边只看当前账号。
-			const key = this.quotaKey(ctx, account.providerName);
-			const report = anthropicModelLimits(this.quotaRouter.state(key), account.providerName, ctx.model?.id ?? "");
-			const windows: SubWindow[] = report.windows.map((w) => ({
-				name: w.name,
-				remainingPercent: w.remainingPercent,
-				resetAt: w.resetAt,
-			}));
-			if (windows.length === 0) {
-				return {
-					provider: account.providerName,
-					label,
-					source: "unknown",
-					windows: [],
-					note: live?.summary ?? "no data yet",
-				};
-			}
-			const observedAt = report.checkedAt ? Date.parse(report.checkedAt) : undefined;
-			return {
-				provider: account.providerName,
-				label,
-				source: "observed",
-				observedAt: Number.isFinite(observedAt) ? observedAt : undefined,
-				windows,
-				limited: report.limited,
-			};
-		});
-
-		if (options.probe) await this.probeMissingSubs(ctx, accounts, subs, signal);
-		if (!signal?.aborted) ctx.ui.setStatus("multi-pass-subs", formatSubsStatus(subs));
-		return subs;
-	}
-
-	/** `--probe`：对**没有观测数据**的 Anthropic 账号各发一次最小请求，把额度头问出来。
-	 *  逐个串行（不想在一瞬间对同一个订阅打并发），单个失败只影响那一行。 */
-	private async probeMissingSubs(
-		ctx: ExtensionContext,
-		accounts: QuotaAccount[],
-		subs: SubStatus[],
-		signal?: AbortSignal,
-	): Promise<void> {
-		const model = ctx.model?.id || "claude-haiku-4-5";
-		for (const sub of subs) {
-			if (signal?.aborted) return;
-			if (sub.source !== "unknown") continue;
-			const account = accounts.find((a) => a.providerName === sub.provider);
-			if (!account || getBaseProvider(account.providerName) !== "anthropic") continue;
-			const auth = account.auth;
-			const token = auth && auth.type === "oauth" && typeof auth.access === "string" ? auth.access : "";
-			if (!token) {
-				sub.note = "not logged in";
-				continue;
-			}
-			const outcome = await probeAnthropicQuota(token, model);
-			if (outcome.error || outcome.status === 0) {
-				sub.note = outcome.error ?? "probe failed";
-				continue;
-			}
-			const windows = parseAnthropicQuotaHeaders(outcome.headers, model);
-			if (windows.length === 0) {
-				// 拿到了响应却没有额度头：说清楚是「没报」，而不是「没额度」。
-				sub.note = `probed (HTTP ${outcome.status}) — no quota headers returned`;
-				continue;
-			}
-			// 记进共享 quota-state：另一个框（multi-pass-limits）与路由策略立刻同样受益。
-			this.quotaRouter.observe(this.quotaKey(ctx, account.providerName), windows);
-			sub.source = "live";
-			sub.observedAt = Date.now();
-			sub.limited = windows.some((w) => w.limited);
-			sub.windows = windows.map((w) => ({
-				name: w.name,
-				remainingPercent: w.usedPercent === undefined ? undefined : Math.max(0, 100 - w.usedPercent),
-				resetAt: w.resetAt,
-			}));
-			sub.note = undefined;
-		}
+		return readings;
 	}
 
 	async getCurrentModelLimits(ctx: ExtensionContext, refresh = false, signal = ctx.signal) {
@@ -6208,6 +6124,9 @@ export default function multiSub(pi: ExtensionAPI) {
 		return false;
 	};
 
+	// mine/subs-limits: withdraws this chat's sign-in store from the shared limits check.
+	let unregisterLimitsHost: (() => void) | undefined;
+
 	// On session start, reload pools with project-level config
 	pi.on("session_start", async (_event, ctx) => {
 		const effective = loadEffectiveConfig(ctx.cwd);
@@ -6235,6 +6154,13 @@ export default function multiSub(pi: ExtensionAPI) {
 			ctx.ui.setStatus("multi-pass", statusParts.join(" | "));
 		}
 
+		// mine/subs-limits: offer this chat's sign-in store to the shared limits check
+		// (`/subs limit-check` and pi-web-ui's Limits box). The registry is pi's own store.
+		const registry = ctx.modelRegistry;
+		unregisterLimitsHost?.();
+		unregisterLimitsHost = registerLimitsHost(limitsHost(() => registry));
+		installLimitsApi({ file: limitsFile() });
+
 		await enforceProjectRestriction(ctx, "session");
 		await poolManager.selectResetFirst(ctx);
 		await poolManager.getCurrentModelLimits(ctx);
@@ -6252,6 +6178,11 @@ export default function multiSub(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => poolManager.cancelResetSelection());
+	// mine/subs-limits: a closed chat stops offering its sign-in store (it stays as the fallback).
+	pi.on("session_shutdown", () => {
+		unregisterLimitsHost?.();
+		unregisterLimitsHost = undefined;
+	});
 
 	// Capture request identity before response arrival; never attribute a late response to a newly selected account.
 	let quotaRequest: ReturnType<PoolManager["captureQuotaRequest"]>;
@@ -6347,7 +6278,7 @@ export default function multiSub(pi: ExtensionAPI) {
 	pi.registerCommand("subs", {
 		description: "Manage extra OAuth subscriptions",
 		getArgumentCompletions: (prefix: string) => {
-			const subcommands = ["list", "add", "remove", "login", "logout", "switch", "status", "limits", "limit-status"];
+			const subcommands = ["list", "add", "remove", "login", "logout", "switch", "status", "limits", "limit-check", "limit-status"];
 			const filtered = subcommands.filter((s) => s.startsWith(prefix));
 			return filtered.length > 0
 				? filtered.map((s) => ({ value: s, label: s }))
@@ -6382,20 +6313,18 @@ export default function multiSub(pi: ExtensionAPI) {
 				case "quota":
 				case "usage":
 					return handleSubsLimits(ctx);
-				// mine/subs-status：一次查完**所有订阅**并写进右下角状态框
-				// （与「当前账号」的 multi-pass-limits 并存）。只在这里刷新，不自动轮询。
+				// mine/subs-limits: check every account (the same check as pi-web-ui's Limits box:
+				// free usage pages, nothing sent to a model) and show them in the multi-pass-subs box.
 				case "limit-status":
 				case "limit-check":
 				case "status-all": {
-					// --probe：对还没有观测数据的账号各发一次最小请求（max_tokens: 1）。
-					// 不加就只用已有观测，一个字节都不花。
-					const probe = /(^|\s)--probe(\s|$)/.test(rest);
-					const subs = await poolManager.refreshAllSubsStatus(ctx, { probe });
-					const checked = subs.filter((x) => x.source !== "unknown").length;
-					ctx.ui.notify(
-						`Checked ${subs.length} subscription(s); ${checked} reported quota. See the multi-pass-subs box.`,
-						"info",
-					);
+					const readings = await poolManager.checkAllSubsLimits(ctx);
+					const summary = limitsCheckSummary(readings);
+					const probeNote = /(^|\s)--probe(\s|$)/.test(rest)
+						? " --probe is no longer needed: every account is checked for free."
+						: "";
+					ctx.ui.notify(`${summary.text} See the multi-pass-subs box.${probeNote}`,
+						summary.failed ? "warning" : "info");
 					return;
 				}
 				default:

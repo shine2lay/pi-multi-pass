@@ -63,6 +63,7 @@ When one account hits a rate limit during an assistant turn, multi-pass automati
 /subs list         List subscriptions with auth status; select one for quick actions
 /subs status       Detailed status (token expiry, pool membership)
 /subs limits       Check built-in quota/usage support (Codex + Google)
+/subs limit-check  Check every signed-in account's limits now (fork; see below)
 ```
 
 ### `/pool` -- Rotation pool and chain management
@@ -436,6 +437,7 @@ quota snapshots. `current_model_limits` and the single quota footer show the las
 staleness. No model probes, undocumented usage endpoint, authentication override, background polling,
 or API-key subscription-quota guesses. The first ordinary response must supply usable headers;
 missing headers remain unavailable. `/subs limits` still lists only the queryable Codex/Google sources.
+(`/subs limit-check`, below, reads Anthropic's usage page when you ask; its readings never feed routing.)
 The installed transport exposes successful responses; some error responses have no header event.
 Errors without a known exhausted window use bounded retry backoff rather than invented reset times.
 
@@ -449,6 +451,30 @@ after 14 days. Credentials lacking a stable account ID invalidate their cache wh
 one ordinary response repopulates it. Disk failures fall back to session memory.
 
 See [PATCHES.md](PATCHES.md) for module boundaries, hooks, tests, and fork maintenance notes.
+
+## Fork: every account's limits (`/subs limit-check`)
+
+`/subs limit-check` (aliases `limit-status`, `status-all`) checks **every** signed-in subscription
+and shows them in the `multi-pass-subs` box:
+
+- **Claude accounts:** Anthropic's free usage page (`GET /api/oauth/usage`, the page Claude Code's
+  `/usage` reads): 5-hour and weekly use, per-model weekly windows when present, and reset times.
+  Plan and email come from the profile page. Nothing is sent to a model; no tokens are spent.
+- **ChatGPT:** the existing `/wham/usage` checker. Other providers with a checker use theirs.
+- **Every account, every time:** each base provider with a subscription sign-in, every configured
+  numbered account (even signed out), and any account seen before. None is dropped, and the
+  numbers never depend on the chat's model or project.
+- **Reliable:** about 10 s per attempt, one retry after a timeout, a 5xx or a network error; a 429
+  waits for `Retry-After` (capped at 5 s) once, then reports "provider busy". Accounts are checked
+  in parallel, one check per account at a time; a second request while a check runs joins it.
+- **Failures keep the last numbers**, with their age and the reason in plain words: signed out,
+  sign-in expired, provider busy (429), timed out, no answer.
+- **Sign-ins** are refreshed only by pi (the refresh pi runs before a request, under its lock).
+  When that's not possible the row says "sign-in expired; refreshes when the account is next used".
+- **One set of numbers:** readings go to `~/.pi/agent/multi-pass-quota/subs-limits.json`, written
+  whole. Numbers seen in normal replies update their account's row for free. `--probe` is gone.
+- **pi-web-ui's Limits box** uses the same check through a versioned channel on `globalThis`
+  (`Symbol.for("pi-multi-pass.limits")`, contract v1 in `extensions/mine/subs-limits.ts`).
 
 ## Environment variable (optional)
 

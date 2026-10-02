@@ -279,48 +279,62 @@ no mutation of the source report. `scripts/test.sh` = 15 checks green.
 **Compat:** display-only. Nothing is written to `~/.pi/agent/multi-pass.json`, so unpatched upstream
 (and an older fork) behave exactly as before.
 
-### subs-status  ·  status: local
-**Why:** the footer only answers "how much is left on the account I'm using right now"
-(`multi-pass-limits`). With several subscriptions in a pool the more useful question is
-"how much is left *everywhere*, and who should I switch to" — and there was no way to see that
-without walking the interactive `/subs limits` picker one account at a time.
-**Behavior:** `/subs limit-status` (aliases `limit-check`, `status-all`) checks every configured
-subscription once and publishes a separate status entry, `multi-pass-subs`, so it sits in its own
-box beside the existing current-account one instead of overwriting it. One line per subscription:
-provider slot + your label, each window as `7d 61% (in 3d 15h)`, ordered so the **soonest-expiring
-allowance comes first** (same preference as `weekly-first` routing) with limited accounts last.
-Two data sources, always distinguished in the text: directly queryable quota (Codex usage) is
-reported fresh, while passively observed quota (Anthropic subscription limits ride on normal
-response headers) is shown with its observation age. An account never observed prints
-`no data yet — send one message on this account`; it is never rendered as `0%`, because
-"not observed" and "exhausted" are opposite facts. Refreshed on that command, and then **kept current for free**: once you have opened the panorama in
-a session, it also refreshes at the same moments the bottom box does — model/account switch,
-end of a run, and the instant a fresh quota header is observed — but in read-only mode
-(`query: false`): no usage queries, no probes, nothing spent. That is what turns an account from
-`no data yet` into real numbers just by using it. Before you have ever opened it, nothing is
-published at all — no box appears uninvited, and no polling ever happens.
-**Hooks in `extensions/multi-sub.ts`:** `PoolManager.refreshAllSubsStatus()` plus its own
-`collectAllSubAccounts()`. The existing `collectQuotaAccounts()` only enumerates providers that have
-a quota checker (Codex / Google), so an Anthropic-only setup produced *zero* accounts
-("Checked 0 subscription(s)"); the panoramic view must list every configured subscription and fall
-back to observations for the ones with no queryable endpoint. Project-level provider restrictions
-still apply. Quota itself still comes from `runQuotaChecks` and the shared quota-state observations; the `/subs`
-handler gains the three subcommand spellings and the completion list gains `limit-status`.
-**Anthropic:** the same code path as the current-account box — `anthropicModelLimits()` reading the
-shared quota-state — so the two boxes can never disagree; this one just walks every account instead
-of only the active one. Accounts never used have no observation, which is exactly when you most want
-a number, so `/subs limit-status --probe` sends **one minimal request per unobserved account**
-(`max_tokens: 1`, one-character prompt, no streaming) purely to harvest the quota response headers,
-then writes them into the shared quota-state so the other box and the router benefit immediately.
-Opt-in only — never on a bare `limit-status`, never in the background: spending quota to draw a box
-must be something you asked for. Accounts that already have observations are skipped, failures
-degrade to a per-line note (`probe failed` / `probe timed out` / `probed (HTTP 429) — no quota
-headers returned`), and only `anthropic-ratelimit-*` headers are kept — cookies and account
-identifiers from the response are never held in memory.
-**Files:** `extensions/mine/subs-status.ts`, `extensions/mine/anthropic-probe.ts`,
-`tests/subs-status-check.mjs`, `tests/anthropic-probe-check.mjs`
-**Test:** `node tests/subs-status-check.mjs` — window/age formatting incl. Unix-seconds input,
-`?` instead of a fabricated `0%`, observation age labelling, limited marker, ordering
-(soonest reset first, limited last), header, empty config. `scripts/test.sh` = 16 checks green.
-**Compat:** display-only; no config or schema change. Removing the patch removes only the extra
-box and the subcommand.
+### subs-status  ·  status: superseded by subs-limits
+**Was:** `/subs limit-status` (aliases `limit-check`, `status-all`) showing every subscription in its
+own `multi-pass-subs` box. Claude accounts only showed numbers seen in recent replies, filtered by the
+chat's current model, and `--probe` spent a `max_tokens: 1` message per unobserved account.
+**Now:** the subcommands and the box stay; everything behind them is `subs-limits` below.
+`extensions/mine/subs-status.ts`, `extensions/mine/anthropic-probe.ts` and their checks are gone.
+
+### subs-limits  ·  status: local
+**Why:** `/subs limit-check` missed accounts. Claude accounts were never asked: they showed only
+numbers seen in recent replies, filtered by the current chat's model, so an account not used lately
+(or a chat on another model) said "no data yet". The ChatGPT account wasn't listed at all unless it
+was also configured as a numbered sub. The owner wants every account, reliably, also in pi-web-ui's
+left panel (a Limits box under History, with a refresh button).
+**Behavior:** one check, `checkAllLimits()`, used by `/subs limit-check` and by pi-web-ui:
+- **Every account, every time:** each base provider with a subscription sign-in in pi's store, every
+  configured numbered sub (shown "signed out" when it is), and any account seen before (it keeps its
+  row instead of vanishing). No model, no project filter: numbers never depend on the chat.
+- **Claude:** `GET https://api.anthropic.com/api/oauth/usage` (`anthropic-beta: oauth-2025-04-20`), the
+  free page Claude Code's `/usage` reads: `five_hour` / `seven_day` (utilization in percent,
+  `resets_at`), per-model weekly windows from `seven_day_<model>` and `limits[]` (`weekly_scoped` with
+  a model scope). Plan (Max/Pro/Free) and email from `/api/oauth/profile`, at most every 12 h.
+- **Others:** the existing checkers (ChatGPT `/wham/usage`), handed the same reliable fetch.
+- **Reliable:** 10 s per attempt including the body; one retry after a timeout, a 5xx or a network
+  error; a 429 waits for `Retry-After` (capped at 5 s) once, then reports busy. Accounts run in
+  parallel, at most one check per account; a check requested while one runs joins it.
+- **Failures keep the last numbers** with the reason in plain words: signed out, sign-in expired
+  (refreshes when the account is next used), provider busy (429), timed out, no answer, check failed.
+- **Sign-ins:** refreshed only through pi's own store (`ModelRegistry.getProviderAuth`, the refresh
+  pi runs before a request, under its lock, written back by pi). Tokens within 2 minutes of expiry
+  count as expired, so no checker ever refreshes on its own. Nothing writes auth.json; no token is
+  logged or stored.
+- **One file:** `~/.pi/agent/multi-pass-quota/subs-limits.json` (version 1), written whole (temp +
+  rename). Numbers seen in normal replies (Anthropic quota headers, the footer's Codex checks) update
+  their account's row for free, but only once a check has created the rows. Readings from the usage
+  page never feed routing: rotation and the footer are unchanged.
+- **Shared:** every chat in the process registers its sign-in store; the versioned channel
+  `globalThis[Symbol.for("pi-multi-pass.limits")]` = `{ v: 1, listeners, api: { check, readings,
+  checking, file } }` lets pi-web-ui's server run the check and hear every change (it falls back to
+  reading the file when no chat has loaded pi-multi-pass). Contract types: `LimitsChannelV1`.
+**Hooks in `extensions/multi-sub.ts`:** imports; `limitsFile()` and `limitsHost()` replace
+`collectAllSubAccounts()`; `QuotaCheckResult` gains optional `plan`/`email`, `ProviderQuotaChecker.check`
+an optional `fetchImpl` (the Codex checker uses it); `rememberQuotaResult()` and
+`observeQuotaResponse()` call `recordReplyLimits()`; `PoolManager.checkAllSubsLimits()` replaces
+`refreshAllSubsStatus()`/`probeMissingSubs()`, and `refreshSubsStatusIfShown()` re-renders from the
+file; `session_start` registers the chat's store and installs the API, a second `session_shutdown`
+handler withdraws it; the `/subs` case runs the check (`--probe` only gets a note); completions gain
+`limit-check`.
+**Files:** `extensions/mine/subs-limits.ts`, `tests/subs-limits-check.mjs`; the two vm-based
+harnesses (`tests/reset-first-check.mjs`, `tests/quota-routing-check.mjs`) spread the new module into
+their context.
+**Test:** `node tests/subs-limits-check.mjs` (fake fetch, temp files, no real calls): every account
+gets a row (signed out, API key, unknown provider, configured-but-signed-out, gone-but-seen); the
+usage page's windows (legacy fields, `limits[]`, per-model, null resets); profile → plan; an expired
+token goes through `refresh` and is re-read, a failed refresh says "sign-in expired"; 401/429/5xx,
+timeouts (headers and body), network errors, retries and Retry-After; failures keep the last numbers;
+concurrent checks join; reply numbers; the channel; text formatting; and source asserts on the hooks
+above. `scripts/test.sh` = 16 checks green.
+**Compat:** nothing new in `~/.pi/agent/multi-pass.json`; unpatched upstream ignores the readings
+file. Removing the patch removes the check, the file and the channel.
