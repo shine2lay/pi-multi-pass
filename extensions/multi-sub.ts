@@ -107,7 +107,9 @@ import {
 	recordReplyLimits,
 	registerLimitsHost,
 	windowsFromChecker,
+	windowsFromCodexUsage,
 	windowsFromQuotaHeaders,
+	type LimitWindow as LimitsWindow,
 	type LimitsCredential,
 	type LimitsHost,
 } from "./mine/subs-limits.ts";
@@ -452,6 +454,8 @@ interface QuotaCheckResult {
 	/** mine/subs-limits: shown in the Limits box. */
 	plan?: string;
 	email?: string;
+	/** mine/subs-limits: every window in the reply, of any length (a Free plan's 30-day one). */
+	usageWindows?: LimitsWindow[];
 }
 
 interface ProviderQuotaChecker {
@@ -1434,6 +1438,7 @@ function limitsHost(registry: () => ExtensionContext["modelRegistry"] | undefine
 				kind: result.kind, windows: result.limits?.windows,
 				limited: result.limits?.limited ?? result.resetUsage?.limited,
 				plan: result.plan, email: result.email, summary: result.summary,
+				usageWindows: result.usageWindows,
 			};
 		},
 	};
@@ -1534,6 +1539,7 @@ const codexQuotaChecker: ProviderQuotaChecker = {
 				limits: codexModelLimits(resetUsage),
 				plan: snapshot.planType !== "unknown" ? snapshot.planType : undefined,
 				email: snapshot.email || undefined,
+				usageWindows: windowsFromCodexUsage(data),
 			};
 		} catch (error: unknown) {
 			if (signal?.aborted || isAbortError(error)) throw error;
@@ -2811,7 +2817,10 @@ class PoolManager {
 	private rememberQuotaResult(ctx: ExtensionContext, provider: string, result: QuotaCheckResult): void {
 		if (result.limits) this.modelLimits.remember(provider, result.limits);
 		// mine/subs-limits: numbers this chat read anyway update the Limits box too (free).
-		try { recordReplyLimits(limitsFile(), provider, windowsFromChecker(result.limits?.windows)); } catch { /* side update */ }
+		try {
+			recordReplyLimits(limitsFile(), provider, result.usageWindows?.length
+				? result.usageWindows : windowsFromChecker(result.limits?.windows));
+		} catch { /* side update */ }
 		if (!result.resetUsage) return;
 		const now = Date.now(), windows: QuotaWindow[] = [];
 		for (const [name, w] of [["5h", result.resetUsage.fiveHour], ["7d", result.resetUsage.weekly]] as const) {

@@ -295,6 +295,42 @@ export function windowsFromQuotaHeaders(
 	return out;
 }
 
+/** A ChatGPT window's length → its key and label: 5-hour, Weekly, else "N-day" / "N-hour". */
+function codexWindowName(seconds: number): [string, string] {
+	if (Math.abs(seconds - 18_000) <= 120) return ["5h", "5-hour"];
+	if (Math.abs(seconds - 604_800) <= 120) return ["7d", "Weekly"];
+	if (seconds >= 86_400 - 120) {
+		const days = Math.round(seconds / 86_400);
+		return [`${days}d`, `${days}-day`];
+	}
+	const hours = Math.max(1, Math.round(seconds / 3_600));
+	return [`${hours}h`, `${hours}-hour`];
+}
+
+/**
+ * ChatGPT's `/wham/usage` reply → rows: `rate_limit.primary_window` / `secondary_window`, of any
+ * length. The checker's own parser (`parseResetUsage`, which rotation uses) keeps only 5-hour and
+ * weekly windows, so a Free plan's one 30-day window was dropped and its row said "no usage numbers".
+ * `reset_at` is Unix seconds; without it, `reset_after_seconds` counts from `now`.
+ */
+export function windowsFromCodexUsage(data: unknown, now = Date.now()): LimitWindow[] {
+	const rate = record(record(data)?.rate_limit);
+	if (!rate) return [];
+	const out: LimitWindow[] = [];
+	for (const value of [rate.primary_window, rate.secondary_window]) {
+		const raw = record(value);
+		if (!raw || !finite(raw.used_percent) || raw.used_percent < 0) continue;
+		if (!finite(raw.limit_window_seconds) || raw.limit_window_seconds <= 0) continue;
+		const [key, label] = codexWindowName(raw.limit_window_seconds);
+		const resetAt = finite(raw.reset_at) && raw.reset_at > 0 ? raw.reset_at
+			: finite(raw.reset_after_seconds) && raw.reset_after_seconds >= 0
+				? Math.floor(now / 1000 + raw.reset_after_seconds) : undefined;
+		const window = usageWindow(key, label, raw.used_percent, resetAt);
+		if (window && !out.some((w) => w.key === window.key)) out.push(window);
+	}
+	return out;
+}
+
 // ==========================================================================
 // Reliable fetch: a deadline per attempt, one retry, 429s wait for Retry-After
 // ==========================================================================
@@ -406,6 +442,10 @@ export interface OtherCheckResult {
 	/** The checker's verdict: `missing-auth` = signed out, `error` = failed. */
 	kind: string;
 	windows?: { name: string; usedPercent?: number; remainingPercent?: number; resetAt?: string | number }[];
+	/** Windows read straight from the provider's (2xx) reply, of any length (ChatGPT's 30-day window).
+	 *  Used instead of `windows`, and they count even when the checker's own verdict, which knows only
+	 *  5-hour and weekly windows, says `error`. */
+	usageWindows?: LimitWindow[];
 	limited?: boolean;
 	plan?: string;
 	email?: string;
@@ -597,8 +637,10 @@ export async function checkAccount(
 		}
 		if (!result) return fail("unsupported");
 		if (result.kind === "missing-auth") return fail("signed-out");
-		const windows = windowsFromChecker(result.windows);
-		if (result.kind !== "error" && windows.length > 0) {
+		const read = (result.usageWindows ?? []).filter((w) => w && text(w.key, 60) && text(w.label, 60) && finite(w.usedPercent))
+			.map((w) => ({ ...w, usedPercent: clampPercent(w.usedPercent!), resetAt: toSeconds(w.resetAt) })).slice(0, 20);
+		const windows = read.length > 0 ? read : windowsFromChecker(result.windows);
+		if ((result.kind !== "error" || read.length > 0) && windows.length > 0) {
 			return good(windows, Boolean(result.limited) || windows.some((w) => w.limited), {
 				plan: planName(result.plan) ?? row.plan, email: text(result.email, 120) ?? row.email,
 			});

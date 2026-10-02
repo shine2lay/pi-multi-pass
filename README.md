@@ -460,7 +460,8 @@ and shows them in the `multi-pass-subs` box:
 - **Claude accounts:** Anthropic's free usage page (`GET /api/oauth/usage`, the page Claude Code's
   `/usage` reads): 5-hour and weekly use, per-model weekly windows when present, and reset times.
   Plan and email come from the profile page. Nothing is sent to a model; no tokens are spent.
-- **ChatGPT:** the existing `/wham/usage` checker. Other providers with a checker use theirs.
+- **ChatGPT:** the existing `/wham/usage` checker, showing every window it reports (5-hour and
+  weekly on paid plans, one 30-day window on Free). Other providers with a checker use theirs.
 - **Every account, every time:** each base provider with a subscription sign-in, every configured
   numbered account (even signed out), and any account seen before. None is dropped, and the
   numbers never depend on the chat's model or project.

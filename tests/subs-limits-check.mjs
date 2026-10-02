@@ -8,7 +8,7 @@ import {
 	installLimitsApi, limitsChannel, limitsCheckSummary, limitsChecking, listAccounts,
 	parseAnthropicProfile, parseAnthropicUsage, planName, readLimitsReadings, recordReplyLimits,
 	registerLimitsHost, reliableFetch, retryAfterMs, sanitizeReadings, windowsFromChecker,
-	windowsFromQuotaHeaders, writeLimitsReadings,
+	windowsFromCodexUsage, windowsFromQuotaHeaders, writeLimitsReadings,
 } from "../extensions/mine/subs-limits.ts";
 
 /* subs-limits: every account on every check, through the providers' free usage pages,
@@ -432,6 +432,71 @@ assert.equal(retryAfterMs(null), undefined);
 	assert.equal(denied.failure.text, "check failed (HTTP 403)");
 }
 
+/* --- ChatGPT: every window in /wham/usage, of any length (a Free plan has one 30-day window) --- */
+{
+	resetShared();
+	// The shape ChatGPT sent for a Free plan on 2026-10-02 (ids and email left out).
+	const free = {
+		plan_type: "free",
+		rate_limit: {
+			allowed: true, limit_reached: false,
+			primary_window: { used_percent: 10, limit_window_seconds: 2_592_000, reset_after_seconds: 1_364_167, reset_at: 1_792_287_776 },
+			secondary_window: null,
+		},
+		chatpass: { windows: [{ used_percent: 0, limit_window_seconds: 2_592_000, reset_at: 1_793_515_609 }] },
+	};
+	assert.deepEqual(windowsFromCodexUsage(free, NOW).map((w) => [w.key, w.label, w.usedPercent, w.resetAt, w.limited]), [
+		["30d", "30-day", 10, 1_792_287_776, undefined],
+	], "the 30-day window is read; other blocks (chatpass) are not limits");
+	const plus = {
+		rate_limit: {
+			primary_window: { used_percent: 30, limit_window_seconds: 18_000, reset_at: 1_790_935_200 },
+			secondary_window: { used_percent: 100, limit_window_seconds: 604_800, reset_after_seconds: 3_600 },
+		},
+	};
+	assert.deepEqual(windowsFromCodexUsage(plus, NOW).map((w) => [w.key, w.label, w.usedPercent, w.resetAt, w.limited]), [
+		["5h", "5-hour", 30, 1_790_935_200, undefined],
+		["7d", "Weekly", 100, Math.floor(NOW / 1000) + 3_600, true],
+	], "5-hour and weekly as before; without reset_at, reset_after_seconds counts from now");
+	const odd = { rate_limit: {
+		primary_window: { used_percent: 5, limit_window_seconds: 7_200 },
+		secondary_window: { used_percent: "lots", limit_window_seconds: 604_800 },
+	} };
+	assert.deepEqual(windowsFromCodexUsage(odd, NOW).map((w) => [w.key, w.label]), [["2h", "2-hour"]],
+		"any other length gets its own name; a window without a number is skipped, never 0%");
+	assert.deepEqual(windowsFromCodexUsage({}, NOW), []);
+	assert.deepEqual(windowsFromCodexUsage({ rate_limit: { primary_window: { used_percent: 5 } } }, NOW), [],
+		"a window without its length is skipped");
+
+	// The real checker knows only 5-hour and weekly windows, so for a Free plan its verdict is
+	// "error"; the windows read from the reply still make a good row.
+	const freeHost = makeHost({
+		creds: { "openai-codex": oauth("c") },
+		checkOther: async (_p, base, _c, fetchImpl) => {
+			if (base !== "openai-codex") return undefined;
+			const body = await (await fetchImpl(WHAM, {})).json();
+			return { kind: "error", windows: [], plan: body.plan_type, usageWindows: windowsFromCodexUsage(body, NOW) };
+		},
+	});
+	const slot = listAccounts(freeHost, undefined, NOW)[0];
+	const out = await checkAccount(freeHost, slot, undefined, opts(newFile(), makeFetch(() => json(free))));
+	assert.equal(out.failure, undefined, "a Free plan's row has numbers, not 'no usage numbers in the reply'");
+	assert.deepEqual([out.plan, out.windows.map((w) => [w.key, w.usedPercent])], ["Free", [["30d", 10]]]);
+	assert.match(formatAccountLine(out, NOW), /^ChatGPT 1 · Free — 30-day 10% used, resets in 15d \d+h · checked /);
+
+	// An "error" verdict with nothing read is still a failure, and keeps the last numbers.
+	const blank = makeHost({
+		creds: { "openai-codex": oauth("c") },
+		checkOther: async (_p, _b, _c, fetchImpl) => {
+			const body = await (await fetchImpl(WHAM, {})).json();
+			return { kind: "error", windows: [], usageWindows: windowsFromCodexUsage(body, NOW) };
+		},
+	});
+	const failed = await checkAccount(blank, slot, out, opts(newFile(), makeFetch(() => json({}))));
+	assert.equal(failed.failure.text, "check failed (no usage numbers in the reply)");
+	assert.deepEqual(failed.windows.map((w) => w.key), ["30d"], "the last good numbers stay");
+}
+
 /* --- concurrent checks join; the shared channel --- */
 {
 	resetShared();
@@ -594,7 +659,10 @@ assert.equal(retryAfterMs(null), undefined);
 	assert.match(sessionStart, /installLimitsApi\(\{ file: limitsFile\(\) \}\)/);
 	assert.match(src, /pi\.on\("session_shutdown", \(\) => \{\s*unregisterLimitsHost\?\.\(\);/);
 	assert.match(src, /case "limit-check":[\s\S]{0,80}case "status-all": \{\s*const readings = await poolManager\.checkAllSubsLimits\(ctx\);/);
-	assert.match(src, /rememberQuotaResult[\s\S]{0,800}recordReplyLimits\(limitsFile\(\), provider, windowsFromChecker/);
+	assert.match(src, /rememberQuotaResult[\s\S]{0,800}recordReplyLimits\(limitsFile\(\), provider, result\.usageWindows\?\.length\s*\? result\.usageWindows : windowsFromChecker\(result\.limits\?\.windows\)\)/);
+	const codexChecker = src.slice(src.indexOf("const codexQuotaChecker"), src.indexOf("const googleGeminiCliQuotaChecker"));
+	assert.match(codexChecker, /usageWindows: windowsFromCodexUsage\(data\)/, "ChatGPT rows read every window in the reply");
+	assert.match(hostFnSource(src), /usageWindows: result\.usageWindows/);
 	assert.match(src, /recordReplyLimits\(limitsFile\(\), request\.provider, windowsFromQuotaHeaders\(windows\)\)/);
 	const ifShown = src.slice(src.indexOf("async refreshSubsStatusIfShown"), src.indexOf("async checkAllSubsLimits"));
 	assert.ok(ifShown.length > 0);
@@ -605,6 +673,10 @@ assert.equal(retryAfterMs(null), undefined);
 	assert.match(src, /"multi-pass-limits"/, "the footer's current-account box stays");
 	assert.equal((mod.match(/writeFileSync\(/g) ?? []).length, 1, "the readings file is the only thing written");
 	assert.doesNotMatch(mod, /console\.|auth\.json"/, "no logging (no token can leak), no auth.json path");
+}
+
+function hostFnSource(text) {
+	return text.slice(text.indexOf("function limitsHost("), text.indexOf("const codexQuotaChecker"));
 }
 
 rmSync(root, { recursive: true, force: true });

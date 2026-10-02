@@ -300,7 +300,11 @@ left panel (a Limits box under History, with a refresh button).
   free page Claude Code's `/usage` reads: `five_hour` / `seven_day` (utilization in percent,
   `resets_at`), per-model weekly windows from `seven_day_<model>` and `limits[]` (`weekly_scoped` with
   a model scope). Plan (Max/Pro/Free) and email from `/api/oauth/profile`, at most every 12 h.
-- **Others:** the existing checkers (ChatGPT `/wham/usage`), handed the same reliable fetch.
+- **Others:** the existing checkers (ChatGPT `/wham/usage`), handed the same reliable fetch. ChatGPT
+  rows take every window in the reply, of any length (`windowsFromCodexUsage`): a Free plan has one
+  30-day window, which the checker's own parser (5-hour and weekly only, used by rotation) drops, so
+  its verdict is "error"; the windows read from the reply still make a good row (found live 2026-10-02:
+  the row said "no usage numbers in the reply").
 - **Reliable:** 10 s per attempt including the body; one retry after a timeout, a 5xx or a network
   error; a 429 waits for `Retry-After` (capped at 5 s) once, then reports busy. Accounts run in
   parallel, at most one check per account; a check requested while one runs joins it.
@@ -319,8 +323,8 @@ left panel (a Limits box under History, with a refresh button).
   checking, file } }` lets pi-web-ui's server run the check and hear every change (it falls back to
   reading the file when no chat has loaded pi-multi-pass). Contract types: `LimitsChannelV1`.
 **Hooks in `extensions/multi-sub.ts`:** imports; `limitsFile()` and `limitsHost()` replace
-`collectAllSubAccounts()`; `QuotaCheckResult` gains optional `plan`/`email`, `ProviderQuotaChecker.check`
-an optional `fetchImpl` (the Codex checker uses it); `rememberQuotaResult()` and
+`collectAllSubAccounts()`; `QuotaCheckResult` gains optional `plan`/`email`/`usageWindows` (the Codex
+checker fills them), `ProviderQuotaChecker.check` an optional `fetchImpl` (the Codex checker uses it); `rememberQuotaResult()` and
 `observeQuotaResponse()` call `recordReplyLimits()`; `PoolManager.checkAllSubsLimits()` replaces
 `refreshAllSubsStatus()`/`probeMissingSubs()`, and `refreshSubsStatusIfShown()` re-renders from the
 file; `session_start` registers the chat's store and installs the API, a second `session_shutdown`
@@ -331,7 +335,8 @@ harnesses (`tests/reset-first-check.mjs`, `tests/quota-routing-check.mjs`) sprea
 their context.
 **Test:** `node tests/subs-limits-check.mjs` (fake fetch, temp files, no real calls): every account
 gets a row (signed out, API key, unknown provider, configured-but-signed-out, gone-but-seen); the
-usage page's windows (legacy fields, `limits[]`, per-model, null resets); profile → plan; an expired
+usage page's windows (legacy fields, `limits[]`, per-model, null resets); ChatGPT windows of any
+length (a Free plan's 30-day one, from the reply's real shape); profile → plan; an expired
 token goes through `refresh` and is re-read, a failed refresh says "sign-in expired"; 401/429/5xx,
 timeouts (headers and body), network errors, retries and Retry-After; failures keep the last numbers;
 concurrent checks join; reply numbers; the channel; text formatting; and source asserts on the hooks
