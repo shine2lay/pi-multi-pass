@@ -14,6 +14,7 @@ import * as quotaRouting from "../extensions/mine/quota-routing.ts";
 import * as anthropicQuota from "../extensions/mine/anthropic-quota.ts";
 import * as resetCountdown from "../extensions/mine/reset-countdown.ts";
 import * as subsLimits from "../extensions/mine/subs-limits.ts";
+import * as refusal from "../extensions/mine/refusal-fallback.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const now = Date.now(), day = 86400, seconds = Math.floor(now / 1000);
@@ -113,7 +114,7 @@ try {
   let requests = [], refreshed = [], httpData = { [a]: raw(4, 1, 10, 10), [b]: raw(1, 4, 80, 70) };
   const exports = runInNewContext(`${executable}\n;({ multiSub, PoolManager });`, {
     ...fs, ...path, ...modelFallback, ...reset, ...limits, ...quotaState, ...quotaPolicy, ...quotaRouting, ...anthropicQuota,
-    ...resetCountdown, ...subsLimits,
+    ...resetCountdown, ...subsLimits, ...refusal,
     Type: { Object: (properties) => ({ type: "object", properties }), Boolean: () => ({ type: "boolean" }), Optional: (schema) => schema },
     getAgentDir: () => temp, builtinProviders: () => [],
     getModels: () => ["claude-fable-5-1", "claude-opus-5", modelId, "gpt-5.5"].map((id) => ({ id })),

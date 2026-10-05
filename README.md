@@ -398,6 +398,36 @@ When a project defines `.pi/multi-pass.json` with `allowedSubs`, `/subs limits` 
 
 Future providers can add another checker without changing the `/subs` command surface.
 
+## Fork: one refusal fallback
+
+For the exact Anthropic **cyber-classifier refusal**, opt in to one retry on a
+signed-in non-Anthropic model. Add this top-level setting to
+`~/.pi/agent/multi-pass.json`:
+
+```json
+"refusalFallback": {
+  "enabled": true,
+  "provider": "openai-codex",
+  "model": "gpt-6.1-sol"
+}
+```
+
+The same setting in `.pi/multi-pass.json` overrides it for a project;
+`{"refusalFallback":{"enabled":false}}` disables it there. Project `allowedSubs`
+restrictions still apply. An absent setting means off.
+
+Pi switches normally, keeps that model selected, and continues the existing
+conversation once. It does not replay your message, change its text, mark Claude
+accounts exhausted, or repeat completed tools. The incomplete refused reply stays
+in saved history but is omitted from model context for the retry. Images and the
+rest of the conversation stay intact. This handles classifier false positives;
+the destination model's own safety checks still apply, and a refusal there stops.
+
+Generic refusals, ordinary assistant text, other policy categories and permission
+errors do not match. A missing model/sign-in, a failed switch, Stop, queued new
+input or a manual model change keeps the original error without an automatic retry.
+Set `enabled` to `false` (or remove the key) to turn it off.
+
 ## Fork: sticky quota-aware account rotation
 
 Add `quotaRouting` to a pool in `~/.pi/agent/multi-pass.json` (or a project pool override):

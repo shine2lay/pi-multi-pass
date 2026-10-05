@@ -117,6 +117,7 @@ import { parseAnthropicQuotaHeaders, anthropicModelLimits } from "./mine/anthrop
 import { QuotaStateStore, quotaAccountKey, type QuotaWindow } from "./mine/quota-state.ts";
 import { usesQuotaRouting, type QuotaRoutingConfig } from "./mine/account-policy.ts";
 import { QuotaRouter, type QuotaRoutingHost } from "./mine/quota-routing.ts";
+import { RefusalFallback, normalizeRefusalFallback, type RefusalFallbackConfig, type RefusalModel } from "./mine/refusal-fallback.ts";
 
 // ==========================================================================
 // Provider templates
@@ -1764,6 +1765,7 @@ interface MultiPassConfig {
 	pools: PoolConfig[];
 	chains: ChainConfig[];
 	presets: PresetConfig[];
+	refusalFallback?: RefusalFallbackConfig;
 }
 
 /** Project-level config (.pi/multi-pass.json) */
@@ -1776,6 +1778,8 @@ interface ProjectConfig {
 	 *  "openai-codex" or "openai-codex-2"). If set, only these exact providers
 	 *  are available in this project. If not set, all global providers are available. */
 	allowedSubs?: string[];
+	/** Optional per-project refusal target; enabled:false overrides global routing. */
+	refusalFallback?: RefusalFallbackConfig;
 }
 
 /** Effective config after merging global + project */
@@ -1784,6 +1788,7 @@ interface EffectiveConfig {
 	pools: PoolConfig[];
 	chains: ChainConfig[];
 	presets: PresetConfig[];
+	refusalFallback?: RefusalFallbackConfig;
 	/** Exact provider names allowed in this project, if restricted. */
 	allowedProviderNames?: string[];
 	/** Which project config was loaded from, if any */
@@ -1809,6 +1814,7 @@ function normalizeMultiPassConfig(raw: unknown): MultiPassConfig {
 		pools: Array.isArray(parsed.pools) ? parsed.pools : [],
 		chains: Array.isArray(parsed.chains) ? parsed.chains : [],
 		presets: Array.isArray(parsed.presets) ? parsed.presets : [],
+		...(parsed.refusalFallback !== undefined ? { refusalFallback: normalizeRefusalFallback(parsed.refusalFallback) } : {}),
 	};
 }
 
@@ -1818,6 +1824,7 @@ function normalizeProjectConfig(raw: unknown): ProjectConfig {
 	if (Array.isArray(parsed.pools)) config.pools = parsed.pools;
 	if (Array.isArray(parsed.chains)) config.chains = parsed.chains;
 	if (Array.isArray(parsed.allowedSubs)) config.allowedSubs = parsed.allowedSubs;
+	if (parsed.refusalFallback !== undefined) config.refusalFallback = normalizeRefusalFallback(parsed.refusalFallback);
 	return config;
 }
 
@@ -1886,6 +1893,7 @@ function loadEffectiveConfig(cwd: string): EffectiveConfig {
 			pools: global.pools,
 			chains: global.chains,
 			presets: global.presets,
+			refusalFallback: global.refusalFallback,
 		};
 	}
 
@@ -1908,6 +1916,7 @@ function loadEffectiveConfig(cwd: string): EffectiveConfig {
 		pools,
 		chains,
 		presets: global.presets,
+		refusalFallback: project.refusalFallback ?? global.refusalFallback,
 		allowedProviderNames,
 		projectConfigPath: projectConfigPath(cwd),
 	};
@@ -2882,6 +2891,12 @@ class PoolManager {
 			report: (message) => { this.recordTrace(message); ctx.ui.notify(message, "info"); },
 			signal: ctx.signal,
 		};
+	}
+
+	// Use the normal switch and suppress our own selection-time account rerouting.
+	async switchRefusalModel(ctx: ExtensionContext, target: RefusalModel): Promise<boolean> {
+		const model = ctx.modelRegistry.find(target.provider, target.id);
+		return model ? this.resetFirst.switchModel(model, () => this.pi.setModel(model)) : false;
 	}
 
 	manualQuotaSelection(): void { this.quotaRouter.manualSelection(); }
@@ -6090,6 +6105,7 @@ export default function multiSub(pi: ExtensionAPI) {
 	// Initialize pool manager with global pools (updated on session_start with project config)
 	const poolManager = new PoolManager(pi);
 	poolManager.loadPools(config.pools);
+	const refusalFallback = new RefusalFallback();
 
 	let projectRestrictionSwitchInFlight = false;
 	const enforceProjectRestriction = async (
@@ -6138,6 +6154,7 @@ export default function multiSub(pi: ExtensionAPI) {
 
 	// On session start, reload pools with project-level config
 	pi.on("session_start", async (_event, ctx) => {
+		refusalFallback.reset();
 		const effective = loadEffectiveConfig(ctx.cwd);
 		poolManager.loadPools(effective.pools);
 
@@ -6178,6 +6195,7 @@ export default function multiSub(pi: ExtensionAPI) {
 	});
 
 	pi.on("model_select", async (event, ctx) => {
+		if (!refusalFallback.isSelecting || !poolManager.isManagedSelection(ctx)) refusalFallback.cancel();
 		if (!poolManager.isManagedSelection(ctx) && event.source !== "restore") poolManager.manualQuotaSelection();
 		await enforceProjectRestriction(ctx, "model");
 		await poolManager.selectResetFirst(ctx);
@@ -6186,7 +6204,8 @@ export default function multiSub(pi: ExtensionAPI) {
 		await poolManager.refreshSubsStatusIfShown(ctx);
 	});
 
-	pi.on("session_shutdown", () => poolManager.cancelResetSelection());
+	pi.on("session_switch", () => refusalFallback.reset());
+	pi.on("session_shutdown", () => { refusalFallback.cancel(); poolManager.cancelResetSelection(); });
 	// mine/subs-limits: a closed chat stops offering its sign-in store (it stays as the fallback).
 	pi.on("session_shutdown", () => {
 		unregisterLimitsHost?.();
@@ -6203,6 +6222,7 @@ export default function multiSub(pi: ExtensionAPI) {
 	});
 
 	pi.on("input", async (event, ctx) => {
+		refusalFallback.cancel();
 		if (event.text.trimStart().startsWith("/")) {
 			return { action: "continue" as const };
 		}
@@ -6216,9 +6236,22 @@ export default function multiSub(pi: ExtensionAPI) {
 
 	// Listen for user input to track last prompt
 	pi.on("before_agent_start", async (event, ctx) => {
+		refusalFallback.reset();
 		lastUserPrompt = event.prompt;
 		poolManager.startTurn(event.prompt, ctx.model);
 	});
+
+	// mine/refusal-fallback: continue the existing context once, without replaying user input.
+	pi.on("turn_end", (event, ctx) => {
+		refusalFallback.observe(event.message, event.messageEntryId, ctx.model);
+	});
+	pi.on("agent_before_settle", async (event, ctx) => refusalFallback.retry(event, {
+		config: () => loadEffectiveConfig(ctx.cwd), current: () => ctx.model,
+		authenticated: (provider) => getAuthStorage(ctx).hasAuth(provider),
+		available: (target) => Boolean(ctx.modelRegistry.find(target.provider, target.id)),
+		setModel: (target) => poolManager.switchRefusalModel(ctx, target),
+		notify: (message) => ctx.ui.notify(message, "info"), signal: ctx.signal,
+	}));
 
 	// Listen for errors to trigger pool rotation
 	pi.on("agent_end", async (event: AgentEndEvent, ctx: ExtensionContext) => {
