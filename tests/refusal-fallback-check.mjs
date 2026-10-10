@@ -7,6 +7,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { runInNewContext } from "node:vm";
 import { execFileSync } from "node:child_process";
 import * as refusal from "../extensions/mine/refusal-fallback.ts";
+import * as signin from "../extensions/mine/signin-failover.ts";
 import * as quotaState from "../extensions/mine/quota-state.ts";
 import * as accountPolicy from "../extensions/mine/account-policy.ts";
 import * as quotaRouting from "../extensions/mine/quota-routing.ts";
@@ -181,7 +182,7 @@ try {
         .replace(/^import\s+[\s\S]*?\sfrom\s+["'][^"']+["'];/gm, "")
         .replace("export default function multiSub", "function multiSub");
       const production = runInNewContext(`${executable}\n;({multiSub, loadEffectiveConfig, normalizeMultiPassConfig});`, {
-        ...fs, ...path, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
+        ...fs, ...path, ...refusal, ...signin, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
         ...limits, ...reset, ...fallback, ...countdown, ...subsLimits,
         Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
         builtinProviders: () => [], getModels: () => [{ id: source.id }, { id: target.id }],

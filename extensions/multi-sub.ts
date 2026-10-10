@@ -118,6 +118,7 @@ import { QuotaStateStore, quotaAccountKey, type QuotaWindow } from "./mine/quota
 import { usesQuotaRouting, type QuotaRoutingConfig } from "./mine/account-policy.ts";
 import { QuotaRouter, type QuotaRoutingHost } from "./mine/quota-routing.ts";
 import { RefusalFallback, normalizeRefusalFallback, type RefusalFallbackConfig, type RefusalModel } from "./mine/refusal-fallback.ts";
+import { SignInContinuation, SignInFailures, credentialStamp, parseSignInFailure } from "./mine/signin-failover.ts";
 
 // ==========================================================================
 // Provider templates
@@ -2497,6 +2498,11 @@ class PoolManager {
 	private resetFirst = new ResetFirstRouter();
 	private modelLimits = new CurrentModelLimits();
 	private quotaRouter = new QuotaRouter(new QuotaStateStore(join(getAgentDir(), "multi-pass-quota")));
+	// mine/signin-failover: members whose sign-in can't be renewed, shared by every chat.
+	readonly signIn = new SignInFailures(join(getAgentDir(), "multi-pass-quota", "signin-failed.json"),
+		(provider) => credentialStamp(readStoredCredential(provider)));
+	readonly signInContinuation = new SignInContinuation();
+	signInLabel(provider: string): string | undefined { return this.signIn.label(provider); }
 	private limitsGeneration = 0;
 
 	constructor(pi: ExtensionAPI) {
@@ -2591,6 +2597,7 @@ class PoolManager {
 		const now = Date.now();
 		return pool.members.filter((member) => {
 			if (!authStorage.hasAuth(member)) return false;
+			if (this.signIn.blocked(member)) return false; // mine/signin-failover
 			const exhaustedAt = state.exhausted.get(member);
 			if (exhaustedAt && now - exhaustedAt < state.cooldownMs) return false;
 			if (exhaustedAt && now - exhaustedAt >= state.cooldownMs) {
@@ -2659,6 +2666,11 @@ class PoolManager {
 					reason: "already-attempted",
 					detail: `${candidate} skipped (already attempted this turn)`,
 				});
+				continue;
+			}
+			const signInLabel = this.signIn.label(candidate); // mine/signin-failover
+			if (signInLabel && authStorage.hasAuth(candidate)) {
+				skips.push({ type: "pool-member", poolName: pool.name, reason: "sign-in-failed", detail: `${candidate} skipped (${signInLabel})` });
 				continue;
 			}
 			const skip = classifyPoolMemberSkip(
@@ -2870,6 +2882,7 @@ class PoolManager {
 			accountKey: (provider) => this.quotaKey(ctx, provider),
 			eligible: (pool, provider, modelId) => getAuthStorage(ctx).hasAuth(provider)
 				&& Boolean(ctx.modelRegistry.find(provider, modelId))
+				&& !this.signIn.blocked(provider)
 				&& !(this.quotaTargetBlocked(pool, provider, modelId, getAuthStorage(ctx))
 					?? (this.isMemberExhausted(pool, provider) || isModelExhausted(pool.name, provider, modelId))),
 			check: async (provider, signal) => {
@@ -2913,6 +2926,7 @@ class PoolManager {
 			signal: ctx.signal,
 			eligible: (pool, provider, modelId) => getAuthStorage(ctx).hasAuth(provider)
 				&& Boolean(ctx.modelRegistry.find(provider, modelId))
+				&& !this.signIn.blocked(provider)
 				&& !this.isMemberExhausted(pool, provider)
 				&& !isModelExhausted(pool.name, provider, modelId),
 			check: async (providerName, signal) => {
@@ -3250,18 +3264,23 @@ class PoolManager {
 		config: MultiPassConfig,
 	): Promise<boolean> {
 		if (!currentModel) return false;
-		if (!isRateLimitError(errorMessage)) return false;
+		// mine/signin-failover: a member's failed sign-in moves on like a limit refusal (checked first:
+		// its stack's line numbers can look like a 429).
+		const signIn = parseSignInFailure(errorMessage);
+		if (signIn ? signIn.provider !== currentModel.provider : !isRateLimitError(errorMessage)) return false;
 
 		const pool = this.getPoolForProvider(currentModel.provider);
 		if (!pool) return false;
 
 		this.recordTrace(`${currentModel.provider} failed with ${summarizeTraceError(errorMessage)}`);
-		if (usesQuotaRouting(pool, currentModel.id)) this.quotaRouter.failed(this.quotaKey(ctx, currentModel.provider), currentModel.id);
+		if (signIn) this.recordTrace(`${currentModel.provider} marked ${this.signIn.mark(signIn).kind === "refused" ? "sign-in failed" : "sign-in unreachable"}`);
+		else if (usesQuotaRouting(pool, currentModel.id)) this.quotaRouter.failed(this.quotaKey(ctx, currentModel.provider), currentModel.id);
 		const cascade = this.ensureCascadeState(lastUserPrompt, currentModel);
 
 		// Mark current as exhausted before planning the forward-only cascade.
 		// mine/model-fallback: scope exhaustion to (provider, model) first; mark the whole
 		// provider exhausted only when no untried sibling model remains for it.
+		if (!signIn) {
 		const exhaustion = recordModelExhaustion({
 			poolName: pool.name,
 			provider: currentModel.provider,
@@ -3271,6 +3290,7 @@ class PoolManager {
 		this.recordTrace(exhaustion.detail);
 		if (exhaustion.escalate) {
 			this.markExhausted(currentModel.provider);
+		}
 		}
 
 		const plan = this.buildFailoverPlan(
@@ -3359,7 +3379,12 @@ class PoolManager {
 			: `pool ${nextCandidate.poolName} (${pool.strategy || "round-robin"})`;
 		this.recordTrace(`selected ${nextCandidate.provider} (${nextCandidate.modelId}) via ${route}`);
 
-		if (lastUserPrompt && !piWillRetryTurn(errorMessage)) {
+		if (signIn) {
+			// Pi never retries a sign-in failure; continue the same run at settle, no prompt replay.
+			const armed = this.signInContinuation.arm({ provider: currentModel.provider, id: currentModel.id },
+				{ provider: nextModel.provider, id: nextModel.id });
+			this.recordTrace(armed ? "continuing the turn after the sign-in failover" : "sign-in failover: turn not continued");
+		} else if (lastUserPrompt && !piWillRetryTurn(errorMessage)) {
 			this.suppressNextStartTurn = true;
 			this.pi.sendUserMessage(lastUserPrompt, { deliverAs: "followUp" });
 			this.recordTrace("queued follow-up because pi will not retry this error");
@@ -4859,7 +4884,7 @@ function formatPoolListDescription(
 function formatPoolStatusLines(
 	pool: PoolConfig,
 	authStorage: { hasAuth(provider: string): boolean },
-	poolManager: Pick<PoolManager, "getAvailableMembers" | "isMemberExhausted">,
+	poolManager: Pick<PoolManager, "getAvailableMembers" | "isMemberExhausted"> & Partial<Pick<PoolManager, "signInLabel">>,
 ): string[] {
 	const summary = summarizePoolHealth(pool, authStorage, poolManager);
 	const strategy = pool.strategy || "round-robin";
@@ -4882,8 +4907,10 @@ function formatPoolStatusLines(
 		const authed = authStorage.hasAuth(member);
 		const exhausted = pool.enabled && authed && poolManager.isMemberExhausted(pool, member);
 		let status = authed ? "logged in" : "not logged in";
+		const signInLabel = authed ? poolManager.signInLabel?.(member) : undefined; // mine/signin-failover
+		if (signInLabel) status = `${signInLabel} (skipped until it signs in again)`;
 		if (exhausted) status += " (rate limited, cooling down)";
-		if (pool.enabled && authed && !exhausted) status += " (available)";
+		if (pool.enabled && authed && !exhausted && !signInLabel) status += " (available)";
 		if (!pool.enabled && authed) status += " (pool disabled)";
 
 		const schedule = memberSchedule[member];
@@ -4965,7 +4992,8 @@ interface FailoverSkip {
 		| "unavailable-model"
 		| "no-eligible-members"
 		| "already-attempted"
-		| "already-visited-chain-entry";
+		| "already-visited-chain-entry"
+		| "sign-in-failed";
 	detail: string;
 	chainName?: string;
 	chainIndex?: number;
@@ -6196,6 +6224,7 @@ export default function multiSub(pi: ExtensionAPI) {
 
 	pi.on("model_select", async (event, ctx) => {
 		if (!refusalFallback.isSelecting || !poolManager.isManagedSelection(ctx)) refusalFallback.cancel();
+		if (!poolManager.isManagedSelection(ctx)) poolManager.signInContinuation.cancel(); // mine/signin-failover
 		if (!poolManager.isManagedSelection(ctx) && event.source !== "restore") poolManager.manualQuotaSelection();
 		await enforceProjectRestriction(ctx, "model");
 		await poolManager.selectResetFirst(ctx);
@@ -6204,7 +6233,7 @@ export default function multiSub(pi: ExtensionAPI) {
 		await poolManager.refreshSubsStatusIfShown(ctx);
 	});
 
-	pi.on("session_switch", () => refusalFallback.reset());
+	pi.on("session_switch", () => { refusalFallback.reset(); poolManager.signInContinuation.reset(); });
 	pi.on("session_shutdown", () => { refusalFallback.cancel(); poolManager.cancelResetSelection(); });
 	// mine/subs-limits: a closed chat stops offering its sign-in store (it stays as the fallback).
 	pi.on("session_shutdown", () => {
@@ -6223,6 +6252,7 @@ export default function multiSub(pi: ExtensionAPI) {
 
 	pi.on("input", async (event, ctx) => {
 		refusalFallback.cancel();
+		poolManager.signInContinuation.cancel();
 		if (event.text.trimStart().startsWith("/")) {
 			return { action: "continue" as const };
 		}
@@ -6237,6 +6267,7 @@ export default function multiSub(pi: ExtensionAPI) {
 	// Listen for user input to track last prompt
 	pi.on("before_agent_start", async (event, ctx) => {
 		refusalFallback.reset();
+		poolManager.signInContinuation.reset();
 		lastUserPrompt = event.prompt;
 		poolManager.startTurn(event.prompt, ctx.model);
 	});
@@ -6252,6 +6283,18 @@ export default function multiSub(pi: ExtensionAPI) {
 		setModel: (target) => poolManager.switchRefusalModel(ctx, target),
 		notify: (message) => ctx.ui.notify(message, "info"), signal: ctx.signal,
 	}));
+
+	// mine/signin-failover: remember a failed sign-in's response; a reply clears its member's mark;
+	// after the rotation switched members, continue the run without replaying the prompt.
+	pi.on("turn_end", (event, ctx) => {
+		const message = event.message as { role: string; provider?: string; stopReason?: string };
+		poolManager.signInContinuation.observe(event.message, event.messageEntryId, ctx.model);
+		if (message.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted" && message.provider) {
+			poolManager.signIn.clear(message.provider);
+		}
+	});
+	pi.on("agent_before_settle", async (event, ctx) =>
+		poolManager.signInContinuation.settle(event, ctx.model, Boolean(ctx.signal?.aborted)));
 
 	// Listen for errors to trigger pool rotation
 	pi.on("agent_end", async (event: AgentEndEvent, ctx: ExtensionContext) => {
@@ -6278,7 +6321,7 @@ export default function multiSub(pi: ExtensionAPI) {
 			}),
 		);
 
-		if (!rotated && isRateLimitError(assistantMsg.errorMessage)) {
+		if (!rotated && isRateLimitError(assistantMsg.errorMessage) && !parseSignInFailure(assistantMsg.errorMessage)) {
 			const pool = ctx.model
 				? poolManager.getPoolForProvider(ctx.model.provider)
 				: undefined;

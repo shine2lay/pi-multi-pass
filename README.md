@@ -188,6 +188,15 @@ cd ~/side-project
 4. Retries your last prompt automatically
 5. After a 5-minute cooldown, `openai-codex` becomes available again
 
+**Failed sign-in (fork):** when a member's saved login can't be renewed (pi's
+"OAuth refresh failed for <member>"), the chat moves on to the next member the
+same way and carries on with the same turn (no prompt replay). Every chat then
+skips that member, and `/pool status` shows it as `sign-in failed HH:MM (skipped
+until it signs in again)`, until a new sign-in is saved for it or one of its
+replies works. A network failure while renewing (`sign-in unreachable`) only
+skips it for 2 minutes. Marks live in `~/.pi/agent/multi-pass-quota/signin-failed.json`
+(no tokens).
+
 ### Pool selection strategy
 
 Each pool has a `strategy` that controls how the next member is chosen on failover:
