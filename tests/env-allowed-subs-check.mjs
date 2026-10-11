@@ -67,7 +67,7 @@ try {
 	// The real multiSub registrations with fake host state (as in signin-failover-check), shaped like the
 	// live config (labels left out): three registered Claude subscriptions, a four-member Claude pool and a
 	// chain to a ChatGPT pool. A chat on one member meets a limit refusal, with and without the variable.
-	async function integration(allowed, start) {
+	async function integration(allowed, start, startModel = model.id) {
 		const temp = fs.mkdtempSync(path.join(tmpdir(), "pi-env-allowed-subs-"));
 		if (allowed === undefined) delete process.env[ALLOWED_SUBS_ENV];
 		else process.env[ALLOWED_SUBS_ENV] = allowed;
@@ -87,11 +87,11 @@ try {
 				...anthropicQuota, ...limits, ...reset, ...fallback, ...countdown, ...subsLimits,
 				Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
 				readStoredCredential: (provider) => creds[provider],
-				builtinProviders: () => [], getModels: () => [model],
+				builtinProviders: () => [], getModels: (provider) => provider === "openai-codex" ? [{ id: "gpt-6.1-sol" }] : [model],
 				process: { env: {}, pid: process.pid }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,
 				fetch: globalThis.fetch,
 			});
-			let current = { provider: start, id: model.id }, switches = 0;
+			let current = { provider: start, id: startModel }, switches = 0;
 			const events = new Map(), notes = [];
 			const ctx = { cwd: temp, get model() { return current; },
 				modelRegistry: {
@@ -118,7 +118,7 @@ try {
 				errorMessage: "429 rate_limit_error: This request would exceed your account's rate limit." };
 			await emit("turn_end", { message, messageEntryId: "failed" });
 			await emit("agent_end", { messages: [message] });
-			return { atStart, after: current.provider, switches, notes, registered };
+			return { atStart, after: current.provider, model: current.id, switches, notes, registered };
 		} finally {
 			delete process.env[ALLOWED_SUBS_ENV];
 			fs.rmSync(temp, { recursive: true, force: true });
@@ -142,6 +142,13 @@ try {
 		const r = await integration("anthropic-4", "anthropic-3");
 		assert.equal(r.atStart, "anthropic-4", `moved at session start: ${r.notes.join(" | ")}`);
 		assert.equal(r.after, "anthropic-4");
+	});
+	await check("real hooks: today's GPT-only pin keeps Sol and cannot fall onto Claude after refusal", async () => {
+		const r = await integration("openai-codex", "openai-codex", "gpt-6.1-sol");
+		assert.equal(r.atStart, "openai-codex");
+		assert.equal(r.after, "openai-codex");
+		assert.equal(r.model, "gpt-6.1-sol");
+		assert.equal(r.switches, 0, "a refusal has no authorised alternative");
 	});
 	assert.equal(fetches, 0, "no network or model calls during checks");
 	console.log(`env-allowed-subs: ${checked} checks passed; no network or model calls`);
