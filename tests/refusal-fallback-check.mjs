@@ -17,6 +17,7 @@ import * as reset from "../extensions/mine/reset-first.ts";
 import * as fallback from "../extensions/mine/model-fallback.ts";
 import * as countdown from "../extensions/mine/reset-countdown.ts";
 import * as subsLimits from "../extensions/mine/subs-limits.ts";
+import * as envAllowed from "../extensions/mine/env-allowed-subs.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const refusalError = "This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy. To learn more, see https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback.";
@@ -183,7 +184,7 @@ try {
         .replace("export default function multiSub", "function multiSub");
       const production = runInNewContext(`${executable}\n;({multiSub, loadEffectiveConfig, normalizeMultiPassConfig});`, {
         ...fs, ...path, ...refusal, ...signin, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
-        ...limits, ...reset, ...fallback, ...countdown, ...subsLimits,
+        ...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...envAllowed,
         Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
         builtinProviders: () => [], getModels: () => [{ id: source.id }, { id: target.id }],
         process: { env: {} }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,

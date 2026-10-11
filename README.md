@@ -524,6 +524,13 @@ export MULTI_SUB="openai-codex:2,anthropic:1"
 
 Env entries merge with saved config.
 
+Fork: `MULTI_PASS_ALLOWED_SUBS` limits one pi process to the listed providers, like a project's
+`allowedSubs` (it replaces that list for the process; unset or blank changes nothing):
+
+```bash
+MULTI_PASS_ALLOWED_SUBS="anthropic-4" pi -p "..."   # this run stays on anthropic-4: no rotation or fallback elsewhere
+```
+
 ## Config files
 
 | File | Scope | Contains |

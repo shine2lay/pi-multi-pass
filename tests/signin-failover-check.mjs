@@ -22,6 +22,7 @@ import * as reset from "../extensions/mine/reset-first.ts";
 import * as fallback from "../extensions/mine/model-fallback.ts";
 import * as countdown from "../extensions/mine/reset-countdown.ts";
 import * as subsLimits from "../extensions/mine/subs-limits.ts";
+import * as envAllowed from "../extensions/mine/env-allowed-subs.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
@@ -125,7 +126,7 @@ try {
 				.replace("export default function multiSub", "function multiSub");
 			const production = runInNewContext(`${executable}\n;({multiSub, formatPoolStatusLines});`, {
 				...fs, ...path, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
-				...limits, ...reset, ...fallback, ...countdown, ...subsLimits,
+				...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...envAllowed,
 				Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
 				readStoredCredential: (provider) => creds[provider],
 				builtinProviders: () => [], getModels: () => [model],
@@ -204,7 +205,7 @@ try {
 				.replace("export default function multiSub", "function multiSub");
 			const { formatPoolStatusLines } = runInNewContext(`${executable}\n;({formatPoolStatusLines});`, {
 				...fs, ...path, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
-				...limits, ...reset, ...fallback, ...countdown, ...subsLimits, Type: {}, getAgentDir: () => temp,
+				...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...envAllowed, Type: {}, getAgentDir: () => temp,
 				readStoredCredential: () => undefined, builtinProviders: () => [], getModels: () => [model],
 				process: { env: {}, pid: process.pid }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,
 			});

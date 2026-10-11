@@ -119,6 +119,7 @@ import { usesQuotaRouting, type QuotaRoutingConfig } from "./mine/account-policy
 import { QuotaRouter, type QuotaRoutingHost } from "./mine/quota-routing.ts";
 import { RefusalFallback, normalizeRefusalFallback, type RefusalFallbackConfig, type RefusalModel } from "./mine/refusal-fallback.ts";
 import { SignInContinuation, SignInFailures, credentialStamp, parseSignInFailure } from "./mine/signin-failover.ts";
+import { withEnvAllowedSubs } from "./mine/env-allowed-subs.ts";
 
 // ==========================================================================
 // Provider templates
@@ -1841,6 +1842,10 @@ function loadGlobalConfig(): MultiPassConfig {
 }
 
 function loadProjectConfig(cwd: string): ProjectConfig | undefined {
+	return withEnvAllowedSubs(loadProjectConfigFile(cwd)); // mine/env-allowed-subs
+}
+
+function loadProjectConfigFile(cwd: string): ProjectConfig | undefined {
 	const path = projectConfigPath(cwd);
 	if (!existsSync(path)) return undefined;
 	try {
