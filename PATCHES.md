@@ -436,3 +436,39 @@ live-shaped config: unset, a limit refusal on anthropic-4 rotates; set to anthro
 (no member, no ChatGPT fallback), and a session started on anthropic-3 moves to anthropic-4.
 On the old source (hook check skipped) the "stays" case fails: it rotates to anthropic. No network.
 **Compat:** no config file change. Unsetting the variable is the undo for a run; removal for all.
+
+### fallback-return  ·  status: local
+**Why:** rotation only moves a chat down its chain (claude-real -> codex-fallback); nothing moved
+it back up, and codex-fallback has one member. On 2026-10-10/11 five chats (Temper, Design and
+Frontend home chats, a Design and a Product queue chat) sat on openai-codex, every turn failing
+with "Codex error: The usage limit has been reached", while anthropic-3 had weekly room (26%).
+**Behavior:** a chat whose provider is in a fallback pool goes back to the chain's primary pool:
+(a) at a new prompt, when the primary pool's own quota routing (weekly-first + earlier-weekly-reset,
+the same pick the chats use) finds a member that is not exhausted, cooling down or signing-in
+failed; (b) when the fallback member refuses with a limit error mid-turn, the turn continues once
+on that primary member (failed reply cut from the context, no prompt replay; pi does not retry the
+Codex usage-limit text by itself). At most one step up per turn (ReturnGuard keyed by the turn's
+cascade); a Claude member that refused this turn counts as exhausted until its cooldown, so no
+ping-pong. Every primary member exhausted: nothing changes, the chat stays on the fallback.
+A pool is a fallback when it has `"fallback": true`, or is the last pool of an enabled chain that
+starts on another pool; `"fallback": false` opts out. `/pool status` shows the role.
+**Hooks in `extensions/multi-sub.ts`:** import; `PoolConfig.fallback?`; `PoolManager`:
+`returnFromFallback()` (new, turn start), `noteTurnStart()` (new, marks the guard),
+`handleError()` (fallback-pool refusal tries `returnCandidates()` first),
+`returnContinuation` (new); `multiSub()` handlers: `input` (cancel continuation, then
+`returnFromFallback`), `before_agent_start` (reset continuation, `noteTurnStart`), `turn_end`
+(observe), `agent_before_settle` (settle); `/pool status` line via `fallbackRoleLine()`.
+**Files:** `extensions/mine/fallback-return.ts`, `tests/fallback-return-check.mjs`; the other
+real-hook harnesses (env-allowed-subs, quota-routing, refusal-fallback, reset-first, signin-failover
+checks) put the module in their vm context.
+**Test:** `node tests/fallback-return-check.mjs` runs the real multiSub hooks with the live pools
+and fake quota: (1) codex chat goes up at turn start when anthropic-3 has room; (2) the Codex
+usage-limit refusal mid-turn continues on Claude, no replay; (3) all Claude exhausted -> stays on
+codex; (4) up, Claude 429, down, codex refusal -> stays down (one step per turn); (5) a Claude chat
+is untouched; (6) no `fallback` field -> last chain pool; (7) source hooks + `node --check`.
+`FALLBACK_RETURN_SOURCE_REF=<old mine> node tests/fallback-return-check.mjs` fails (case 1, stays on
+openai-codex). No network, no model calls.
+**Compat:** works with no config change (last chain pool); live ~/.pi/agent/multi-pass.json marks
+codex-fallback `"fallback": true`. Undo: `pi update --extension
+git:github.com/shine2lay/pi-multi-pass@<previous mine sha>`, remove `"fallback": true`, then a
+checked `pi-web-deploy restart`.

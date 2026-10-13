@@ -407,6 +407,14 @@ When a project defines `.pi/multi-pass.json` with `allowedSubs`, `/subs limits` 
 
 Future providers can add another checker without changing the `/subs` command surface.
 
+## Fork: back up from the fallback pool
+
+A chat that fell down its chain to a backup pool goes back to the chain's first pool by itself:
+at its next prompt when an account there has room (picked by that pool's own quota routing), or
+mid-turn when the backup refuses with a limit error. At most one step up per turn; when every
+primary account is exhausted the chat stays on the backup. The backup is the last pool of the
+chain, or any pool marked `"fallback": true` (`"fallback": false` opts out); `/pool status` shows it.
+
 ## Fork: one refusal fallback
 
 For the exact Anthropic **cyber-classifier refusal**, opt in to one retry on a

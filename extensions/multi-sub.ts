@@ -72,6 +72,8 @@ import {
 	matchesKey,
 	type SelectItem,
 } from "@earendil-works/pi-tui";
+// mine/fallback-return: chats on the fallback pool go back to the primary pool (PATCHES.md)
+import { fallbackRoleLine, ReturnContinuation, ReturnGuard, returnCandidates } from "./mine/fallback-return.ts";
 // mine/model-fallback: model-scoped exhaustion for same-pool chain entries (PATCHES.md)
 import {
 	findApplicableChainForModel,
@@ -1742,6 +1744,9 @@ interface PoolConfig {
 	 *  Only used when strategy is "custom". Resolved relative to the
 	 *  global config directory (~/.pi/agent/). */
 	selectorScript?: string;
+	/** mine/fallback-return: a backup pool; its chats go back to the chain's primary pool when it has room.
+	 *  Without it, the last pool of an enabled chain counts as the fallback. */
+	fallback?: boolean;
 }
 
 interface ChainEntryConfig {
@@ -2498,6 +2503,10 @@ class PoolManager {
 	private pi: ExtensionAPI;
 	private cascadeState: FailoverCascadeState | null = null;
 	private suppressNextStartTurn = false;
+	// mine/fallback-return: one step up per turn (keyed by the turn's cascade); continue after a mid-turn step.
+	private returnGuard = new ReturnGuard<FailoverCascadeState>();
+	private returnedAtTurnStart = false;
+	readonly returnContinuation = new ReturnContinuation();
 	private traceEnabled = false;
 	private routingTrace: RoutingTraceEntry[] = [];
 	private resetFirst = new ResetFirstRouter();
@@ -2917,6 +2926,29 @@ class PoolManager {
 		return model ? this.resetFirst.switchModel(model, () => this.pi.setModel(model)) : false;
 	}
 
+	// mine/fallback-return: at a new turn, a chat on the fallback pool goes back to the primary pool
+	// when its own quota routing finds a member that isn't exhausted or refusing.
+	async returnFromFallback(ctx: ExtensionContext): Promise<void> {
+		const from = ctx.model;
+		if (!from || this.suppressNextStartTurn || ctx.isIdle?.() !== true || ctx.signal?.aborted) return;
+		const config = loadEffectiveConfig(ctx.cwd), host = this.quotaRoutingHost(ctx);
+		const up = returnCandidates(config, from.provider, host.eligible);
+		if (!up.length) return;
+		const ranked = await this.quotaRouter.reorder(up, host,
+			(group) => this.resetFirst.reorder(group, this.resetFirstHost(ctx)));
+		const target = ranked[0];
+		if (!target || ctx.signal?.aborted || ctx.model?.provider !== from.provider || ctx.model?.id !== from.id) return;
+		const fresh = loadEffectiveConfig(ctx.cwd);
+		if (!fresh.pools.some((p) => p.enabled && p.name === target.poolName && p.members.includes(target.provider))) return;
+		const model = ctx.modelRegistry.find(target.provider, target.modelId);
+		if (!model || !(await this.resetFirst.switchModel(model, () => this.pi.setModel(model)))) return;
+		this.returnedAtTurnStart = true;
+		const message = `[pool:${target.poolName}] fallback-return: ${from.provider} -> ${target.provider} (${target.modelId}); a primary account has room`;
+		this.recordTrace(message);
+		ctx.ui.notify(message, "info");
+		ctx.ui.setStatus("multi-pass", formatFailoverStatus(target));
+	}
+
 	manualQuotaSelection(): void { this.quotaRouter.manualSelection(); }
 	isManagedSelection(ctx: ExtensionContext): boolean { return this.resetFirst.isManagedSelection(ctx.model); }
 	async recoverQuotaAccount(ctx: ExtensionContext): Promise<void> {
@@ -3241,6 +3273,12 @@ class PoolManager {
 		}
 	}
 
+	// mine/fallback-return: a step up at turn start uses this turn's one step (no ping-pong).
+	noteTurnStart(): void {
+		if (this.returnedAtTurnStart && this.cascadeState) this.returnGuard.mark(this.cascadeState);
+		this.returnedAtTurnStart = false;
+	}
+
 	clearCascadeState(): void {
 		this.cascadeState = null;
 	}
@@ -3307,6 +3345,15 @@ class PoolManager {
 				visitedChainIndexes: cascade.visitedChainIndexes,
 			},
 		);
+
+		// mine/fallback-return: a refusal on the fallback pool goes back up to the primary pool first,
+		// once per turn; members that refused in this turn are attempted/exhausted and not offered.
+		let steppedUp = false;
+		if (!signIn && this.returnGuard.allow(cascade)) {
+			const up = returnCandidates(config, currentModel.provider, this.quotaRoutingHost(ctx).eligible,
+				cascade.attemptedProviders);
+			if (up.length) { plan.candidates.unshift(...up); steppedUp = true; }
+		}
 
 		// Strategy-aware reordering of pool candidates before failover.
 		await this.reorderCandidatesByStrategy(
@@ -3384,7 +3431,13 @@ class PoolManager {
 			: `pool ${nextCandidate.poolName} (${pool.strategy || "round-robin"})`;
 		this.recordTrace(`selected ${nextCandidate.provider} (${nextCandidate.modelId}) via ${route}`);
 
-		if (signIn) {
+		if (steppedUp && nextCandidate.poolName !== pool.name) {
+			// mine/fallback-return: pi does not retry the Codex usage-limit text; continue once, no replay.
+			this.returnGuard.mark(cascade);
+			const armed = this.returnContinuation.arm({ provider: currentModel.provider, id: currentModel.id },
+				{ provider: nextModel.provider, id: nextModel.id });
+			this.recordTrace(armed ? "fallback-return: continuing the turn on the primary pool" : "fallback-return: turn not continued");
+		} else if (signIn) {
 			// Pi never retries a sign-in failure; continue the same run at settle, no prompt replay.
 			const armed = this.signInContinuation.arm({ provider: currentModel.provider, id: currentModel.id },
 				{ provider: nextModel.provider, id: nextModel.id });
@@ -4900,6 +4953,10 @@ function formatPoolStatusLines(
 		`members: ${summary.memberCount}`,
 		`availability: ${summary.statusLabel}`,
 	];
+	try { // mine/fallback-return
+		const role = fallbackRoleLine(loadGlobalConfig(), pool.name);
+		if (role) lines.push(role);
+	} catch { /* status only */ }
 	if (pool.selectorScript) {
 		lines.push(`selector: ${pool.selectorScript}`);
 	}
@@ -6261,8 +6318,10 @@ export default function multiSub(pi: ExtensionAPI) {
 		if (event.text.trimStart().startsWith("/")) {
 			return { action: "continue" as const };
 		}
+		poolManager.returnContinuation.cancel(); // mine/fallback-return
 		const ok = await enforceProjectRestriction(ctx, "input");
 		if (ok && event.source !== "extension") await poolManager.recoverQuotaAccount(ctx);
+		if (ok) await poolManager.returnFromFallback(ctx); // mine/fallback-return
 		return ok ? { action: "continue" as const } : { action: "handled" as const };
 	});
 
@@ -6273,9 +6332,18 @@ export default function multiSub(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, ctx) => {
 		refusalFallback.reset();
 		poolManager.signInContinuation.reset();
+		poolManager.returnContinuation.reset(); // mine/fallback-return
 		lastUserPrompt = event.prompt;
 		poolManager.startTurn(event.prompt, ctx.model);
+		poolManager.noteTurnStart();
 	});
+
+	// mine/fallback-return: after a mid-turn step up from the fallback pool, continue the run once.
+	pi.on("turn_end", (event, ctx) => {
+		poolManager.returnContinuation.observe(event.message as any, event.messageEntryId, ctx.model, isRateLimitError);
+	});
+	pi.on("agent_before_settle", async (event, ctx) =>
+		poolManager.returnContinuation.settle(event, ctx.model, Boolean(ctx.signal?.aborted)));
 
 	// mine/refusal-fallback: continue the existing context once, without replaying user input.
 	pi.on("turn_end", (event, ctx) => {
