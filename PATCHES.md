@@ -442,33 +442,64 @@ On the old source (hook check skipped) the "stays" case fails: it rotates to ant
 it back up, and codex-fallback has one member. On 2026-10-10/11 five chats (Temper, Design and
 Frontend home chats, a Design and a Product queue chat) sat on openai-codex, every turn failing
 with "Codex error: The usage limit has been reached", while anthropic-3 had weekly room (26%).
-**Behavior:** a chat whose provider is in a fallback pool goes back to the chain's primary pool:
-(a) at a new prompt, when the primary pool's own quota routing (weekly-first + earlier-weekly-reset,
-the same pick the chats use) finds a member that is not exhausted, cooling down or signing-in
-failed; (b) when the fallback member refuses with a limit error mid-turn, the turn continues once
-on that primary member (failed reply cut from the context, no prompt replay; pi does not retry the
-Codex usage-limit text by itself). At most one step up per turn (ReturnGuard keyed by the turn's
-cascade); a Claude member that refused this turn counts as exhausted until its cooldown, so no
-ping-pong. Every primary member exhausted: nothing changes, the chat stays on the fallback.
-A pool is a fallback when it has `"fallback": true`, or is the last pool of an enabled chain that
-starts on another pool; `"fallback": false` opts out. `/pool status` shows the role.
-**Hooks in `extensions/multi-sub.ts`:** import; `PoolConfig.fallback?`; `PoolManager`:
-`returnFromFallback()` (new, turn start), `noteTurnStart()` (new, marks the guard),
-`handleError()` (fallback-pool refusal tries `returnCandidates()` first),
-`returnContinuation` (new); `multiSub()` handlers: `input` (cancel continuation, then
+**Behavior:** returns use the chain's first pool/model, ranked by that primary pool's own quota
+routing. A member must have room and not be exhausted, cooling down or sign-in failed. At a new
+prompt the fallback role alone permits the return: `"fallback": true`, or (when absent) the last
+pool of an enabled chain starting elsewhere; `"fallback": false` disables it. On an eligible
+mid-turn refusal, optional boolean `returnOnRefusal` overrides that role; when absent the role
+still decides, preserving previous behavior. Thus `fallback:false` + `returnOnRefusal:true`
+returns on refusal only, never at a send. `fallback:true` + `returnOnRefusal:false` is prompt-only.
+`/pool status` reports the refusal-only role explicitly. No change to which errors count.
+
+The Codex usage-limit refusal continues the turn once on the selected primary member (failed reply
+cut from context, no prompt replay; pi does not retry that text by itself). One step up per turn;
+an account refused this turn is never retried in that turn (ReturnGuard and existing attempted/
+exhausted state). Every
+primary member exhausted: stay on the current pool. No go-back code: with the live primary's
+quotaRouting `recovery:"off"`, subsequent sends stay where a refusal landed. H-PICK-2 restores the
+missed GPT refusal return while keeping the owner's send-time moves off.
+**Hooks in `extensions/multi-sub.ts`:** import; `PoolConfig.fallback?` and `returnOnRefusal?`;
+`PoolManager.returnFromFallback()` (prompt trigger, unchanged), `noteTurnStart()` (guard),
+`handleError()` (`returnCandidates(..., "refusal")` before the forward-only candidates),
+`returnContinuation`; `multiSub()` handlers: `input` (cancel continuation, then
 `returnFromFallback`), `before_agent_start` (reset continuation, `noteTurnStart`), `turn_end`
-(observe), `agent_before_settle` (settle); `/pool status` line via `fallbackRoleLine()`.
+(observe), `agent_before_settle` (settle); `/pool status` via `fallbackRoleLine()`.
 **Files:** `extensions/mine/fallback-return.ts`, `tests/fallback-return-check.mjs`; the other
 real-hook harnesses (env-allowed-subs, quota-routing, refusal-fallback, reset-first, signin-failover
 checks) put the module in their vm context.
-**Test:** `node tests/fallback-return-check.mjs` runs the real multiSub hooks with the live pools
-and fake quota: (1) codex chat goes up at turn start when anthropic-3 has room; (2) the Codex
-usage-limit refusal mid-turn continues on Claude, no replay; (3) all Claude exhausted -> stays on
-codex; (4) up, Claude 429, down, codex refusal -> stays down (one step per turn); (5) a Claude chat
-is untouched; (6) no `fallback` field -> last chain pool; (7) source hooks + `node --check`.
-`FALLBACK_RETURN_SOURCE_REF=<old mine> node tests/fallback-return-check.mjs` fails (case 1, stays on
-openai-codex). No network, no model calls.
-**Compat:** works with no config change (last chain pool); live ~/.pi/agent/multi-pass.json marks
-codex-fallback `"fallback": true`. Undo: `pi update --extension
-git:github.com/shine2lay/pi-multi-pass@<previous mine sha>`, remove `"fallback": true`, then a
-checked `pi-web-deploy restart`.
+**Test:** `node tests/fallback-return-check.mjs` runs real multiSub hooks with live-shaped pools,
+fake quota and no network/model. Cases 1–7 unchanged: turn-start return, mid-turn continuation,
+exhausted primary, no ping-pong, unchanged Claude chat, inferred role, source hooks/parse.
+(8) refusal-only config stays on GPT at sends and ineligible errors; actual ordinary load/save,
+rename, member, strategy and toggle edits preserve both fields. (9) GPT limit returns to the
+soonest-week Claude member and continues once, no replay; next send stays there. (10) exhausted
+primary stays down; GPT refusal, up, Claude 429 stops when both already refused, never retries GPT;
+two usable Claude members are tried in turn, and synthetic same-cascade selection back to GPT
+cannot move up or continue again. The original planned down-step was corrected by Ops because
+GPT had already refused in that turn. (11) explicit
+prompt-only role; actual whole-pool replacement loses both fields and restores legacy returns.
+`FALLBACK_RETURN_SOURCE_REF=33ca3a1 node tests/fallback-return-check.mjs` loads both old hooks and
+old fallback-return code: cases 1–8 pass (including old saves), case 9 must fail because GPT stays.
+**Compat:** absent field keeps legacy behavior. Live codex-fallback has `"fallback": false` and
+`"returnOnRefusal": true`; claude-real quotaRouting retains `"recovery": "off"`. Copies already
+loaded from 33ca3a1 ignore the new field, remain inert at sends and stop on the GPT limit. Ordinary
+old load/save and pool edits preserve the unknown field. Install only with `pi update --extension
+git:github.com/shine2lay/pi-multi-pass@mine`; no service restart for this change. New pi processes
+load it immediately; open chats receive it at the next normal pi-web-ui restart.
+
+**Whole-pool overwrite exception (Ops #162):** confirming `/pool create` over codex-fallback replaces
+the pool, dropping **both** fields. Its chain then infers the fallback role again: GPT returns to
+Claude at a new message **and** on refusal when Claude has room; it does not stop at its limit.
+That breaks the owner's refusal-only rule. Repair by adding these exact lines to that pool:
+```json
+"fallback": false,
+"returnOnRefusal": true
+```
+Replacing claude-real also drops its quotaRouting. Restore the existing weekly-first block with
+`"recovery": "off"` inside it (see README); do not just remove the routing policy. Overwrite
+preservation is deliberately not changed here; it would be another patch.
+
+**Undo H-PICK-2:** remove only `returnOnRefusal`, or restore
+`~/kept-from-tmp/2026-10-13/pick-sticks/multi-pass.json.before-H-PICK-2`; retain `fallback:false` and
+recovery off. Code: `pi update --extension git:github.com/shine2lay/pi-multi-pass@33ca3a1`.
+Loaded chats keep their current code until the next normal restart; no restart is requested.

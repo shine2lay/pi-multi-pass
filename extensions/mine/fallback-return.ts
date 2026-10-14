@@ -1,4 +1,4 @@
-/** mine/fallback-return: a chat on the fallback pool goes back up to the primary pool by itself.
+/** mine/fallback-return: a chat may go back up to the primary pool at a send or on refusal.
  *
  * The rotation only ever moves down a chain (claude-real -> codex-fallback). Nothing moved a chat
  * back up, and the fallback pool has one member, so on 2026-10-10/11 five chats sat on openai-codex
@@ -6,7 +6,8 @@
  *
  * Pool roles come from config, not provider names: a pool is a fallback when it carries
  * "fallback": true, or when it is the last pool of an enabled chain that starts on another pool.
- * The primary is that chain's first entry (its pool and its model).
+ * The primary is that chain's first entry (its pool and its model). returnOnRefusal, when set,
+ * overrides that role only on a refusal; fallback:false + returnOnRefusal:true never moves at a send.
  *
  * This module only decides; multi-sub.ts ranks (the primary pool's own quota routing) and switches.
  * At most one step up per turn (ReturnGuard); a primary member that refused in this turn is already
@@ -16,7 +17,7 @@
 import { MAX_CONTINUES_PER_PROMPT, type ContinueBoundary, type ContinueMessage, type ContinueModel,
 	type ContinueResult } from "./signin-failover.ts";
 
-export interface ReturnPool { name: string; members: string[]; enabled: boolean; fallback?: boolean }
+export interface ReturnPool { name: string; members: string[]; enabled: boolean; fallback?: boolean; returnOnRefusal?: boolean }
 export interface ReturnChainEntry { pool: string; model: string; enabled?: boolean }
 export interface ReturnChain { name: string; enabled: boolean; entries: ReturnChainEntry[] }
 export interface ReturnConfig { pools: ReturnPool[]; chains: ReturnChain[] }
@@ -41,14 +42,14 @@ export function isFallbackPool(config: ReturnConfig, name: string): boolean {
 	});
 }
 
-/** Where a chat on this fallback pool goes back to: the first entry of a chain that reaches it. */
-export function primaryTarget(config: ReturnConfig, fallbackPool: string): ReturnTarget | undefined {
-	if (!isFallbackPool(config, fallbackPool)) return undefined;
+/** The first entry of a chain that reaches this pool; the caller checks the trigger's role. */
+export function primaryTarget(config: ReturnConfig, fromPool: string): ReturnTarget | undefined {
+	if (!enabledPool(config, fromPool)) return undefined;
 	for (const chain of config.chains) {
-		if (!chain.enabled || !entriesOf(chain).some((entry) => entry.pool === fallbackPool)) continue;
+		if (!chain.enabled || !entriesOf(chain).some((entry) => entry.pool === fromPool)) continue;
 		const index = chain.entries.findIndex((entry) => entry.enabled !== false);
 		const first = chain.entries[index];
-		if (!first || first.pool === fallbackPool || !enabledPool(config, first.pool)) continue;
+		if (!first || first.pool === fromPool || !enabledPool(config, first.pool)) continue;
 		if (isFallbackPool(config, first.pool)) continue;
 		return { poolName: first.pool, modelId: first.model, chainName: chain.name, chainIndex: index };
 	}
@@ -66,9 +67,12 @@ export function returnCandidates(
 	currentProvider: string,
 	eligible: (pool: ReturnPool, provider: string, modelId: string) => boolean,
 	attempted: ReadonlySet<string> = new Set(),
+	trigger: "prompt" | "refusal" = "prompt",
 ): ReturnCandidate[] {
 	const from = poolOf(config, currentProvider);
 	if (!from) return [];
+	const isFallback = isFallbackPool(config, from.name);
+	if (!(trigger === "refusal" ? from.returnOnRefusal ?? isFallback : isFallback)) return [];
 	const target = primaryTarget(config, from.name);
 	if (!target) return [];
 	const primary = enabledPool(config, target.poolName)!;
@@ -130,9 +134,16 @@ export class ReturnContinuation {
 
 /** One line for /pool status. */
 export function fallbackRoleLine(config: ReturnConfig, poolName: string): string | undefined {
-	if (!isFallbackPool(config, poolName)) return undefined;
+	const pool = enabledPool(config, poolName);
+	if (!pool) return undefined;
+	const isFallback = isFallbackPool(config, poolName);
+	const onRefusal = pool.returnOnRefusal ?? isFallback;
+	if (!isFallback && !onRefusal) return undefined;
 	const target = primaryTarget(config, poolName);
+	if (!isFallback) return target
+		? `role: refusal return (chats go back to ${target.poolName} / ${target.modelId} when it refuses and a member has room; never at a send)`
+		: "role: refusal return (no primary chain entry, so chats stay here; never at a send)";
 	return target
-		? `role: fallback (chats go back to ${target.poolName} / ${target.modelId} when a member has room)`
+		? `role: fallback (chats go back to ${target.poolName} / ${target.modelId} ${onRefusal ? "when a member has room" : "at a send only; never on refusal"})`
 		: "role: fallback (no primary chain entry, so chats stay here)";
 }

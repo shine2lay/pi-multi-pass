@@ -1747,6 +1747,8 @@ interface PoolConfig {
 	/** mine/fallback-return: a backup pool; its chats go back to the chain's primary pool when it has room.
 	 *  Without it, the last pool of an enabled chain counts as the fallback. */
 	fallback?: boolean;
+	/** mine/fallback-return: override the fallback role for refusal-time returns only. */
+	returnOnRefusal?: boolean;
 }
 
 interface ChainEntryConfig {
@@ -3351,7 +3353,7 @@ class PoolManager {
 		let steppedUp = false;
 		if (!signIn && this.returnGuard.allow(cascade)) {
 			const up = returnCandidates(config, currentModel.provider, this.quotaRoutingHost(ctx).eligible,
-				cascade.attemptedProviders);
+				cascade.attemptedProviders, "refusal");
 			if (up.length) { plan.candidates.unshift(...up); steppedUp = true; }
 		}
 

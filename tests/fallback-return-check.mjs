@@ -1,14 +1,14 @@
 // mine/fallback-return: a chat on the fallback pool (GPT backup) goes back to the primary Claude pool
 // by itself when a Claude account can take the turn; never more than one step up per turn.
 // Plain node; no network (fetch throws), no real auth.json, fake credentials only, no model calls.
-// FALLBACK_RETURN_SOURCE_REF=<ref> runs the hook cases on that ref's multi-sub.ts instead (old mine:
-// they must fail, the chat stays on openai-codex).
+// FALLBACK_RETURN_SOURCE_REF=<ref> loads BOTH that ref's hooks and fallback-return module.
+// On 33ca3a1, cases 1-8 pass; case 9 fails because the refusal-only chat stays on openai-codex.
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripTypeScriptTypes } from "node:module";
 import { runInNewContext } from "node:vm";
 import { execFileSync } from "node:child_process";
@@ -30,8 +30,14 @@ const ref = process.env.FALLBACK_RETURN_SOURCE_REF;
 const sourceCode = ref
 	? execFileSync("git", ["show", `${ref}:extensions/multi-sub.ts`], { cwd: root, encoding: "utf8" })
 	: fs.readFileSync(path.join(root, "extensions/multi-sub.ts"), "utf8");
-let returnMod = {};
-try { returnMod = await import("../extensions/mine/fallback-return.ts"); } catch { /* old mine: module absent */ }
+const returnSource = ref
+	? execFileSync("git", ["show", `${ref}:extensions/mine/fallback-return.ts`], { cwd: root, encoding: "utf8" })
+	: undefined;
+const returnMod = returnSource
+	? await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(returnSource,
+		{ mode: "strip", disableExperimentalWarning: true }).replace('"./signin-failover.ts"',
+		JSON.stringify(pathToFileURL(path.join(root, "extensions/mine/signin-failover.ts")).href))).toString("base64")}`)
+	: await import("../extensions/mine/fallback-return.ts");
 
 // The live 2026-10-11 text from the stuck chats (openai-codex, gpt-6.1-sol).
 const CODEX_LIMIT = "Codex error: The usage limit has been reached";
@@ -43,18 +49,21 @@ let checked = 0;
 const urls = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url) => { urls.push(String(url)); throw new Error("Network forbidden in fallback-return checks"); };
+const onlyCase = process.env.FALLBACK_RETURN_CASE;
+if (onlyCase && !/^(?:[1-9]|10|11)$/.test(onlyCase)) throw new Error("FALLBACK_RETURN_CASE must be 1-11");
 const check = async (name, fn) => {
-	try { await fn(); checked++; }
+	if (onlyCase && name.split(" ")[0] !== onlyCase) return;
+	try { await fn(); checked++; console.log(`ok fallback-return: ${name}`); }
 	catch (error) { throw new Error(`fallback-return: ${name}: ${error.message}`); }
 };
 
-const poolsConfig = ({ fallbackFlag = true } = {}) => ({
+const poolsConfig = ({ fallbackFlag = true, poolFields = {}, recovery = "earlier-weekly-reset" } = {}) => ({
 	subscriptions: [], presets: [],
 	pools: [
 		{ name: "claude-real", baseProvider: "anthropic", members: MEMBERS, enabled: true,
-			quotaRouting: { policy: "weekly-first", recovery: "earlier-weekly-reset", minWeeklyResetAdvantageMinutes: 0, maxObservationAgeMinutes: 1440 } },
+			quotaRouting: { policy: "weekly-first", recovery, minWeeklyResetAdvantageMinutes: 0, maxObservationAgeMinutes: 1440 } },
 		{ name: "codex-fallback", baseProvider: "openai-codex", members: ["openai-codex"], enabled: true,
-			...(fallbackFlag ? { fallback: true } : {}) },
+			...(fallbackFlag ? { fallback: true } : {}), ...poolFields },
 	],
 	chains: [
 		{ name: "claude-then-sol", enabled: true, entries: [{ pool: "claude-real", model: CLAUDE, enabled: true }, { pool: "codex-fallback", model: SOL, enabled: true }] },
@@ -67,9 +76,10 @@ const poolsConfig = ({ fallbackFlag = true } = {}) => ({
 const creds = Object.fromEntries([...MEMBERS, "openai-codex"].map((p, i) => [p, { type: "oauth", access: `fake-at-${i}`, refresh: `fake-rt-${i}`, expires: 9e12 }]));
 
 /** room: members with weekly room (26%); every other Claude member is at its weekly limit. */
-function writeQuota(temp, room) {
-	const now = Date.now(), resetAt = Math.floor(now / 1000) + 3 * 86400;
+function writeQuota(temp, room, weeklyResetDays = {}) {
+	const now = Date.now();
 	for (const provider of MEMBERS) {
+		const resetAt = Math.floor(now / 1000) + (weeklyResetDays[provider] ?? 3) * 86400;
 		const key = quotaState.quotaAccountKey(provider, creds[provider]);
 		const full = !room.includes(provider);
 		const dir = path.join(temp, "multi-pass-quota", key);
@@ -81,16 +91,20 @@ function writeQuota(temp, room) {
 	}
 }
 
-async function world({ room, start, fallbackFlag = true }, run) {
+// The owner's live routing shape: no prompt recovery, and the GPT pool returns on refusal only.
+const liveRefusal = { poolFields: { fallback: false, returnOnRefusal: true }, recovery: "off" };
+
+async function world({ room, start, fallbackFlag = true, poolFields, recovery, weeklyResetDays }, run) {
 	modelFallback.clearModelExhaustion(); // module-wide state: each fake chat starts clean
 	const temp = fs.mkdtempSync(path.join(tmpdir(), "pi-fallback-return-"));
 	try {
-		fs.writeFileSync(path.join(temp, "multi-pass.json"), JSON.stringify(poolsConfig({ fallbackFlag })));
-		writeQuota(temp, room);
+		fs.writeFileSync(path.join(temp, "multi-pass.json"), JSON.stringify(poolsConfig({ fallbackFlag, poolFields, recovery })));
+		writeQuota(temp, room, weeklyResetDays);
 		const executable = stripTypeScriptTypes(sourceCode, { mode: "strip", disableExperimentalWarning: true })
 			.replace(/^import\s+[\s\S]*?\sfrom\s+["'][^"']+["'];/gm, "")
 			.replace("export default function multiSub", "function multiSub");
-		const production = runInNewContext(`${executable}\n;({multiSub});`, {
+		const production = runInNewContext(`${executable}\n;({multiSub, loadGlobalConfig, saveGlobalConfig,
+			renamePoolConfig, editPoolMembers, changePoolStrategy, togglePoolConfig, buildPoolConfig, persistPoolConfig});`, {
 			...fs, ...path, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
 			...limits, ...reset, ...modelFallback, ...countdown, ...subsLimits, ...envAllowed, ...returnMod,
 			Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
@@ -114,12 +128,13 @@ async function world({ room, start, fallbackFlag = true }, run) {
 			for (const fn of events.get(name) ?? []) results.push(await fn(event, ctx));
 			return results.filter(Boolean);
 		};
-		production.multiSub({ on: (name, fn) => events.set(name, [...(events.get(name) ?? []), fn]),
+		const pi = { on: (name, fn) => events.set(name, [...(events.get(name) ?? []), fn]),
 			registerCommand() {}, registerProvider() {}, registerTool() {},
 			sendUserMessage: () => { replays++; },
 			setModel: async next => { const previousModel = current; current = { provider: next.provider, id: next.id }; path_.push(current.provider);
 				await emit("model_select", { model: current, previousModel, source: "set" }); return true; },
-		});
+		};
+		production.multiSub(pi);
 		const boundary = (id) => ({ outcome: "error", continue: false, entries: [], context: {
 			contextEntries: [{ sourceEntry: { id: "user" }, messages: [{ role: "user" }] },
 				{ sourceEntry: { id }, messages: [{ role: "assistant" }] }], pendingMessages: [] } });
@@ -129,6 +144,72 @@ async function world({ room, start, fallbackFlag = true }, run) {
 			prompt: async (text, { input = true } = {}) => {
 				if (input) await emit("input", { text, source: "rpc" });
 				await emit("before_agent_start", { prompt: text });
+			},
+			settle: (id) => emit("agent_before_settle", boundary(id)),
+			// Test-only external selection through the existing API; no new input or state reset.
+			select: (model) => pi.setModel(model),
+			/** Real ordinary saves/edits on an isolated config; also runs unchanged on old source. */
+			checkSaves: async () => {
+				const manager = { loadPools() {} };
+				const roles = (stage, name = "codex-fallback") => {
+					const saved = production.loadGlobalConfig();
+					const pool = saved.pools.find((p) => p.name === name);
+					assert.ok(pool, `${stage}: pool still present`);
+					assert.equal(pool.fallback, false, `${stage}: fallback:false survives`);
+					assert.equal(pool.returnOnRefusal, true, `${stage}: unknown returnOnRefusal survives`);
+					assert.equal(saved.pools[0].quotaRouting.recovery, "off", `${stage}: recovery stays off`);
+					return { saved, pool };
+				};
+				let { saved, pool } = roles("load");
+				production.saveGlobalConfig(saved);
+				({ saved, pool } = roles("ordinary save"));
+				ctx.ui.input = async () => "codex-renamed";
+				await production.renamePoolConfig(ctx, manager, saved, pool);
+				({ saved, pool } = roles("rename", "codex-renamed"));
+				assert.equal(saved.chains[0].entries[1].pool, "codex-renamed", "rename updates chain references");
+				ctx.ui.input = async () => "codex-fallback";
+				await production.renamePoolConfig(ctx, manager, saved, pool);
+				({ saved, pool } = roles("rename back"));
+				// Seed one removable fake member so the real member edit takes its saving branch.
+				pool.members.push("openai-codex-2");
+				production.saveGlobalConfig(saved);
+				const picks = ["remove openai-codex-2", "save", "quota-first", "round-robin"];
+				ctx.ui.select = async (_title, items) => {
+					const wanted = picks.shift();
+					const selected = items.find((item) => item === wanted || item.startsWith(`${wanted} —`));
+					assert.ok(selected, `synthetic UI pick exists: ${wanted}`);
+					return selected;
+				};
+				await production.editPoolMembers(ctx, manager, saved, pool);
+				({ saved, pool } = roles("member edit"));
+				assert.deepEqual([...pool.members], ["openai-codex"], "member edit actually saves");
+				await production.changePoolStrategy(ctx, manager, saved, pool);
+				({ saved, pool } = roles("strategy change"));
+				assert.equal(pool.strategy, "quota-first");
+				await production.changePoolStrategy(ctx, manager, saved, pool);
+				({ saved, pool } = roles("strategy reset"));
+				assert.equal(pool.strategy, undefined);
+				await production.togglePoolConfig(ctx, manager, saved, pool);
+				({ saved, pool } = roles("toggle off"));
+				assert.equal(pool.enabled, false);
+				await production.togglePoolConfig(ctx, manager, saved, pool);
+				({ pool } = roles("toggle on"));
+				assert.equal(pool.enabled, true);
+				assert.equal(picks.length, 0, "all real UI edit branches used");
+				console.log(`save compatibility ${ref ?? "working tree"}: load/save, rename, member, strategy, toggle preserve both fields`);
+			},
+			/** Deliberate whole-pool replacement remains out of scope; prove its documented exception. */
+			overwritePool: () => {
+				const config = production.loadGlobalConfig();
+				const built = production.buildPoolConfig({ name: "codex-fallback", baseProvider: "openai-codex",
+					members: ["openai-codex"], enabled: true });
+				assert.equal(built.ok, true);
+				const result = production.persistPoolConfig(config, built.pool);
+				assert.equal(result.action, "updated");
+				production.saveGlobalConfig(result.config);
+				const pool = production.loadGlobalConfig().pools[1];
+				assert.equal(pool.fallback, undefined, "explicit replacement drops fallback");
+				assert.equal(pool.returnOnRefusal, undefined, "explicit replacement drops returnOnRefusal");
 			},
 			/** The current member refuses; returns what settle decided. */
 			fail: async (error, id = `failed-${path_.length}`) => {
@@ -225,6 +306,104 @@ try {
 		execFileSync(process.execPath, ["--check", path.join(root, "extensions/multi-sub.ts")], { stdio: "pipe" });
 	});
 
+	await check("8 refusal-only: new sends stay on GPT; old normal saves keep both fields", () =>
+		world({ ...liveRefusal, room: ["anthropic-3"], start: "openai-codex" }, async (c) => {
+			await c.prompt("offline synthetic request");
+			await c.prompt("another offline synthetic request");
+			assert.deepEqual(c.path, ["openai-codex"], "Claude room does not cause a move at a send");
+			await c.checkSaves();
+			await c.prompt("offline synthetic request after normal edits");
+			assert.deepEqual(c.path, ["openai-codex"], "normal saves do not re-enable prompt returns");
+			for (const error of ["500 internal_server_error", "400 bad_request", "context too long", "Request aborted"]) {
+				assert.equal((await c.fail(error)).length, 0, `no continuation for ${error}`);
+				assert.equal(c.model.provider, "openai-codex", `no account move for ${error}`);
+			}
+			assert.equal(c.replays, 0);
+		}));
+
+	await check("9 refusal-only: Codex limit returns to ranked Claude once without replay", () =>
+		world({ ...liveRefusal, room: ["anthropic-2", "anthropic-4"], start: "openai-codex",
+			weeklyResetDays: { "anthropic-2": 4, "anthropic-4": 1 } }, async (c) => {
+			await c.prompt("offline synthetic request");
+			assert.equal(c.model.provider, "openai-codex");
+			const settled = await c.fail(CODEX_LIMIT, "refusal-only-failed");
+			assert.deepEqual(c.model, { provider: "anthropic-4", id: CLAUDE }, `path ${c.path.join(" -> ")}`);
+			assert.equal(c.replays, 0, "no prompt replay");
+			assert.deepEqual(settled, [{ entries: [{ type: "context_edit", targetId: "refusal-only-failed", replacement: null }], continue: true }]);
+			assert.equal((await c.settle("refusal-only-failed")).length, 0, "the same failure continues only once");
+			await c.prompt("offline synthetic next turn");
+			assert.deepEqual(c.path, ["openai-codex", "anthropic-4"], "the next send stays where the refusal landed");
+			const cfg = poolsConfig(liveRefusal);
+			assert.match(returnMod.fallbackRoleLine(cfg, "codex-fallback"), /refusal return.*claude-real.*never at a send/);
+		}));
+
+	await check("10 refusal-only: no Claude room stays down; one upward move per turn", async () => {
+		await world({ ...liveRefusal, room: [], start: "openai-codex" }, async (c) => {
+			await c.prompt("offline synthetic request");
+			assert.equal((await c.fail(CODEX_LIMIT)).length, 0);
+			assert.deepEqual(c.path, ["openai-codex"], "no eligible Claude, no move or continuation");
+		});
+		await world({ ...liveRefusal, room: ["anthropic-3"], start: "openai-codex" }, async (c) => {
+			await c.prompt("offline synthetic request");
+			assert.equal((await c.fail(CODEX_LIMIT, "first-codex-refusal"))[0]?.continue, true);
+			assert.equal(c.model.provider, "anthropic-3");
+			assert.equal((await c.fail(CLAUDE_429, "claude-refusal")).length, 0);
+			// Ops corrected the plan: the only GPT member already refused, so retrying it
+			// would defeat existing exhaustion/attempted guards. The cascade stops here.
+			assert.deepEqual(c.path, ["openai-codex", "anthropic-3"]);
+			assert.ok(c.notes.some((n) => /Rate limited on openai-codex/.test(n)), "GPT refusal reported");
+			assert.ok(c.notes.some((n) => /openai-codex skipped \(already attempted this turn\)/.test(n)), "refused GPT is never retried");
+			assert.ok(c.notes.some((n) => /Failover exhausted after anthropic-3/.test(n)), "Claude refusal and exhausted stop reported");
+			assert.equal(c.replays, 0);
+		});
+		await world({ ...liveRefusal, room: ["anthropic-2", "anthropic-4"], start: "openai-codex",
+			weeklyResetDays: { "anthropic-2": 4, "anthropic-4": 1 } }, async (c) => {
+			await c.prompt("offline synthetic request");
+			await c.fail(CODEX_LIMIT, "codex-two-primary");
+			assert.equal(c.model.provider, "anthropic-4");
+			await c.fail(CLAUDE_429, "claude-a-refusal");
+			assert.equal(c.model.provider, "anthropic-2", "another usable Claude gets the retry");
+			await c.fail(CLAUDE_429, "claude-b-refusal");
+			assert.deepEqual(c.path, ["openai-codex", "anthropic-4", "anthropic-2"], "stops only after both Claude members refuse");
+			assert.ok(c.notes.some((n) => /Failover exhausted after anthropic-2/.test(n)));
+			assert.equal(c.replays, 0);
+		});
+		await world({ ...liveRefusal, room: ["anthropic-2", "anthropic-4"], start: "openai-codex",
+			weeklyResetDays: { "anthropic-2": 4, "anthropic-4": 1 } }, async (c) => {
+			await c.prompt("offline synthetic request");
+			await c.fail(CODEX_LIMIT, "codex-first-up");
+			assert.equal(c.model.provider, "anthropic-4");
+			// Keep an untried healthy Claude member available, making the guard decisive.
+			await c.select({ provider: "openai-codex", id: SOL });
+			assert.equal((await c.fail(CODEX_LIMIT, "codex-external-return")).length, 0);
+			assert.deepEqual(c.path, ["openai-codex", "anthropic-4", "openai-codex"], "no second upward move despite healthy Claude");
+			assert.equal((await c.settle("codex-external-return")).length, 0, "no second continuation");
+			assert.equal(c.replays, 0);
+		});
+	});
+
+	await check("11 fallback:true + returnOnRefusal:false is prompt-only; overwrite restores legacy role", async () => {
+		const promptOnly = { poolFields: { fallback: true, returnOnRefusal: false }, recovery: "off" };
+		await world({ ...promptOnly, room: ["anthropic-3"], start: "openai-codex" }, async (c) => {
+			await c.prompt("offline synthetic request");
+			assert.equal(c.model.provider, "anthropic-3", "prompt return follows fallback role");
+		});
+		await world({ ...promptOnly, room: ["anthropic-3"], start: "openai-codex" }, async (c) => {
+			await c.prompt("offline synthetic request", { input: false });
+			assert.equal((await c.fail(CODEX_LIMIT)).length, 0, "explicit false disables refusal return");
+			assert.deepEqual(c.path, ["openai-codex"]);
+		});
+		assert.match(returnMod.fallbackRoleLine(poolsConfig(promptOnly), "codex-fallback"), /at a send only; never on refusal/);
+		// Ops's corrected caveat: replacing the whole pool drops BOTH fields. The chain then
+		// infers fallback:true again, so both prompt and refusal returns come back, not a stop.
+		for (const input of [true, false]) await world({ ...liveRefusal, room: ["anthropic-3"], start: "openai-codex" }, async (c) => {
+			c.overwritePool();
+			await c.prompt("offline synthetic request", { input });
+			if (!input) assert.equal((await c.fail(CODEX_LIMIT))[0]?.continue, true);
+			assert.equal(c.model.provider, "anthropic-3", `after explicit overwrite: ${input ? "send" : "refusal"} returns`);
+		});
+	});
+
 	assert.ok(urls.every((u) => !/\/v1\/messages|\/responses|\/completions/.test(u)), `no model calls: ${urls.join(", ")}`);
-	console.log(`fallback-return: ${checked}/7 checks passed; no model calls${urls.length ? ` (${urls.length} refused quota fetches)` : ", no network"}`);
+	console.log(`fallback-return: ${checked}/${onlyCase ? 1 : 11} checks passed${onlyCase ? ` (case ${onlyCase})` : ""}; no model calls${urls.length ? ` (${urls.length} refused quota fetches)` : ", no network"}`);
 } finally { globalThis.fetch = realFetch; }
