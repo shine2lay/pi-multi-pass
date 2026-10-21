@@ -566,6 +566,48 @@ and shows them in the `multi-pass-subs` box:
 - **pi-web-ui's Limits box** uses the same check through a versioned channel on `globalThis`
   (`Symbol.for("pi-multi-pass.limits")`, contract v1 in `extensions/mine/subs-limits.ts`).
 
+## Fork: externally owned Antigravity account
+
+A signed-in **`antigravity`** account from `pi-antigravity` appears once as Antigravity in Limits,
+including `/subs limit-check` and `current_model_limits`. The older `google-antigravity` integration
+still works. Multi-pass does not create another login or replace the external provider's account
+selection, model catalog or native transport. Refresh belongs to Pi/the owning provider.
+
+Readings use its usage-summary groups/buckets or model-catalog quota fallback. These are **shared
+buckets**, not independent allowances for each model variant; model mapping/global exhaustion may
+be unknown. Missing numbers stay unavailable. A full unrelated bucket does not mark the entire
+account exhausted. Failed refreshes retain old readings explicitly stale. No model request is used.
+Previously seen account rows are intentionally retained; if a removed sign-in has a stale row,
+remove only that noncredential row after the old writers have stopped, not the other readings.
+
+An optional explicit three-stage chain can run:
+`claude-real/claude-opus-5-5 -> codex-fallback/gpt-6.1-sol -> antigravity-fallback/gemini-4-argon`.
+Keep Claude's existing weekly-first policy with recovery off. The new pool is:
+
+```json
+{
+  "name": "antigravity-fallback",
+  "baseProvider": "antigravity",
+  "members": ["antigravity"],
+  "enabled": true,
+  "fallback": false,
+  "returnOnRefusal": true
+}
+```
+
+Append `{ "pool": "antigravity-fallback", "model": "gemini-4-argon", "enabled": true }` to the
+chosen enabled chain. Set the middle `codex-fallback` to `fallback:false, returnOnRefusal:false`
+so its limit reaches Argon before returning to Claude. Only the final pool returns on a limit,
+using the ranked primary and the existing one-return/no-retry guards. All targets tried: stop.
+Non-retryable forward chain limits continue without replaying the prompt. Sends/manual selections,
+defaults and the separate classifier-refusal `openai-codex/gpt-6.1-sol` fallback are unchanged.
+Use exact edits or normal edits which preserve optional fields, not whole-pool replacement.
+
+Undo the optional routing activation: remove its third chain entry and new pool, restore the middle
+`returnOnRefusal:true`, keep `fallback:false` and Claude recovery off. Code undo before this patch:
+`pi update --extension git:github.com/shine2lay/pi-multi-pass@2b63f49`, then the normal checked restart
+for already-loaded chats. Never overwrite newer usage with a whole old cache or hand-edit auth stores.
+
 ## Environment variable (optional)
 
 ```bash

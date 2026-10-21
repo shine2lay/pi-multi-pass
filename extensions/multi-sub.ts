@@ -122,6 +122,8 @@ import { QuotaRouter, type QuotaRoutingHost } from "./mine/quota-routing.ts";
 import { RefusalFallback, normalizeRefusalFallback, type RefusalFallbackConfig, type RefusalModel } from "./mine/refusal-fallback.ts";
 import { SignInContinuation, SignInFailures, credentialStamp, parseSignInFailure } from "./mine/signin-failover.ts";
 import { withEnvAllowedSubs } from "./mine/env-allowed-subs.ts";
+// mine/antigravity-limits: read-only compatibility; external provider retains OAuth/catalog/stream.
+import { checkAntigravityLimits } from "./mine/antigravity-limits.ts";
 
 // ==========================================================================
 // Provider templates
@@ -1429,7 +1431,7 @@ function limitsHost(registry: () => ExtensionContext["modelRegistry"] | undefine
 	return {
 		configured: () => normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()))
 			.map((entry) => ({ provider: subProviderName(entry), label: entry.label })),
-		bases: () => Object.keys(PROVIDER_TEMPLATES),
+		bases: () => [...Object.keys(PROVIDER_TEMPLATES), "antigravity"],
 		stored: (provider) => readStoredCredential(provider) as LimitsCredential | undefined,
 		refresh: async (provider) => registry()?.getProviderAuth(provider),
 		checkOther: async (provider, base, credential, fetchImpl, signal) => {
@@ -1579,7 +1581,15 @@ const googleAntigravityQuotaChecker: ProviderQuotaChecker = {
 	},
 };
 
+const antigravityQuotaChecker: ProviderQuotaChecker = {
+	baseProvider: "antigravity",
+	async check(account, signal, fetchImpl) {
+		return { account, ...await checkAntigravityLimits(account.auth, signal, fetchImpl) };
+	},
+};
+
 const PROVIDER_QUOTA_CHECKERS: ProviderQuotaChecker[] = [
+	antigravityQuotaChecker,
 	codexQuotaChecker,
 	googleGeminiCliQuotaChecker,
 	googleAntigravityQuotaChecker,
@@ -3444,6 +3454,13 @@ class PoolManager {
 			const armed = this.signInContinuation.arm({ provider: currentModel.provider, id: currentModel.id },
 				{ provider: nextModel.provider, id: nextModel.id });
 			this.recordTrace(armed ? "continuing the turn after the sign-in failover" : "sign-in failover: turn not continued");
+		} else if (nextCandidate.source === "chain" &&
+			(/^Codex error: The usage limit has been reached\b/i.test(errorMessage) || !piWillRetryTurn(errorMessage))) {
+			// mine/antigravity-limits: raw Codex limit has no status; piWillRetryTurn assumes retry.
+			// GPT's non-retryable limit must continue forward to the
+			// next chain entry too, without replaying the prompt or spending the one upward return.
+			this.returnContinuation.arm({ provider: currentModel.provider, id: currentModel.id },
+				{ provider: nextModel.provider, id: nextModel.id });
 		} else if (lastUserPrompt && !piWillRetryTurn(errorMessage)) {
 			this.suppressNextStartTurn = true;
 			this.pi.sendUserMessage(lastUserPrompt, { deliverAs: "followUp" });

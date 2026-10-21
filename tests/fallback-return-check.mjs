@@ -24,6 +24,7 @@ import * as modelFallback from "../extensions/mine/model-fallback.ts";
 import * as countdown from "../extensions/mine/reset-countdown.ts";
 import * as subsLimits from "../extensions/mine/subs-limits.ts";
 import * as envAllowed from "../extensions/mine/env-allowed-subs.ts";
+import * as antigravityLimits from "../extensions/mine/antigravity-limits.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ref = process.env.FALLBACK_RETURN_SOURCE_REF;
@@ -42,7 +43,8 @@ const returnMod = returnSource
 // The live 2026-10-11 text from the stuck chats (openai-codex, gpt-6.1-sol).
 const CODEX_LIMIT = "Codex error: The usage limit has been reached";
 const CLAUDE_429 = "429 rate_limit_error: This request would exceed your account's rate limit.";
-const CLAUDE = "claude-opus-5-5", SOL = "gpt-6.1-sol";
+const CLAUDE = "claude-opus-5-5", SOL = "gpt-6.1-sol", ARGON = "gemini-4-argon";
+const ARGON_LIMIT = "429 quota exhausted";
 const MEMBERS = ["anthropic", "anthropic-2", "anthropic-3", "anthropic-4"];
 
 let checked = 0;
@@ -50,30 +52,33 @@ const urls = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url) => { urls.push(String(url)); throw new Error("Network forbidden in fallback-return checks"); };
 const onlyCase = process.env.FALLBACK_RETURN_CASE;
-if (onlyCase && !/^(?:[1-9]|10|11)$/.test(onlyCase)) throw new Error("FALLBACK_RETURN_CASE must be 1-11");
+if (onlyCase && !/^(?:[1-9]|1[0-4])$/.test(onlyCase)) throw new Error("FALLBACK_RETURN_CASE must be 1-14");
 const check = async (name, fn) => {
 	if (onlyCase && name.split(" ")[0] !== onlyCase) return;
 	try { await fn(); checked++; console.log(`ok fallback-return: ${name}`); }
 	catch (error) { throw new Error(`fallback-return: ${name}: ${error.message}`); }
 };
 
-const poolsConfig = ({ fallbackFlag = true, poolFields = {}, recovery = "earlier-weekly-reset" } = {}) => ({
+const poolsConfig = ({ fallbackFlag = true, poolFields = {}, recovery = "earlier-weekly-reset", third = false } = {}) => ({
 	subscriptions: [], presets: [],
 	pools: [
 		{ name: "claude-real", baseProvider: "anthropic", members: MEMBERS, enabled: true,
 			quotaRouting: { policy: "weekly-first", recovery, minWeeklyResetAdvantageMinutes: 0, maxObservationAgeMinutes: 1440 } },
 		{ name: "codex-fallback", baseProvider: "openai-codex", members: ["openai-codex"], enabled: true,
 			...(fallbackFlag ? { fallback: true } : {}), ...poolFields },
+		...(third ? [{ name: "antigravity-fallback", baseProvider: "antigravity", members: ["antigravity"], enabled: true,
+			fallback: false, returnOnRefusal: true }] : []),
 	],
 	chains: [
-		{ name: "claude-then-sol", enabled: true, entries: [{ pool: "claude-real", model: CLAUDE, enabled: true }, { pool: "codex-fallback", model: SOL, enabled: true }] },
+		{ name: "claude-then-sol", enabled: true, entries: [{ pool: "claude-real", model: CLAUDE, enabled: true }, { pool: "codex-fallback", model: SOL, enabled: true },
+			...(third ? [{ pool: "antigravity-fallback", model: ARGON, enabled: true }] : [])] },
 		{ name: "fable-then-opus", enabled: false, entries: [{ pool: "claude-real", model: "claude-fable-5-1", enabled: true }, { pool: "claude-real", model: "claude-opus-5", enabled: true }] },
 	],
 	refusalFallback: { enabled: true, provider: "openai-codex", model: SOL },
 });
 
 // Fake credentials (no real token material); keys only identify the fake accounts' quota shards.
-const creds = Object.fromEntries([...MEMBERS, "openai-codex"].map((p, i) => [p, { type: "oauth", access: `fake-at-${i}`, refresh: `fake-rt-${i}`, expires: 9e12 }]));
+const creds = Object.fromEntries([...MEMBERS, "openai-codex", "antigravity"].map((p, i) => [p, { type: "oauth", access: `fake-at-${i}`, refresh: `fake-rt-${i}`, expires: 9e12, projectId: "fake-project" }]));
 
 /** room: members with weekly room (26%); every other Claude member is at its weekly limit. */
 function writeQuota(temp, room, weeklyResetDays = {}) {
@@ -94,11 +99,11 @@ function writeQuota(temp, room, weeklyResetDays = {}) {
 // The owner's live routing shape: no prompt recovery, and the GPT pool returns on refusal only.
 const liveRefusal = { poolFields: { fallback: false, returnOnRefusal: true }, recovery: "off" };
 
-async function world({ room, start, fallbackFlag = true, poolFields, recovery, weeklyResetDays }, run) {
+async function world({ room, start, fallbackFlag = true, poolFields, recovery, weeklyResetDays, third }, run) {
 	modelFallback.clearModelExhaustion(); // module-wide state: each fake chat starts clean
 	const temp = fs.mkdtempSync(path.join(tmpdir(), "pi-fallback-return-"));
 	try {
-		fs.writeFileSync(path.join(temp, "multi-pass.json"), JSON.stringify(poolsConfig({ fallbackFlag, poolFields, recovery })));
+		fs.writeFileSync(path.join(temp, "multi-pass.json"), JSON.stringify(poolsConfig({ fallbackFlag, poolFields, recovery, third })));
 		writeQuota(temp, room, weeklyResetDays);
 		const executable = stripTypeScriptTypes(sourceCode, { mode: "strip", disableExperimentalWarning: true })
 			.replace(/^import\s+[\s\S]*?\sfrom\s+["'][^"']+["'];/gm, "")
@@ -106,17 +111,17 @@ async function world({ room, start, fallbackFlag = true, poolFields, recovery, w
 		const production = runInNewContext(`${executable}\n;({multiSub, loadGlobalConfig, saveGlobalConfig,
 			renamePoolConfig, editPoolMembers, changePoolStrategy, togglePoolConfig, buildPoolConfig, persistPoolConfig});`, {
 			...fs, ...path, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
-			...limits, ...reset, ...modelFallback, ...countdown, ...subsLimits, ...envAllowed, ...returnMod,
+			...limits, ...reset, ...modelFallback, ...countdown, ...subsLimits, ...envAllowed, ...returnMod, ...antigravityLimits,
 			Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
 			readStoredCredential: (provider) => creds[provider],
-			builtinProviders: () => [], getModels: () => [{ id: CLAUDE }, { id: SOL }],
+			builtinProviders: () => [], getModels: () => [{ id: CLAUDE }, { id: SOL }, { id: ARGON }],
 			process: { env: {}, pid: process.pid }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,
 			fetch: globalThis.fetch,
 		});
-		let current = { provider: start, id: start === "openai-codex" ? SOL : CLAUDE };
+		let current = { provider: start, id: start === "openai-codex" ? SOL : start === "antigravity" ? ARGON : CLAUDE };
 		const path_ = [current.provider];
 		let replays = 0;
-		const events = new Map(), notes = [];
+		const events = new Map(), notes = [], registered = [];
 		const ctx = { cwd: temp, get model() { return current; }, isIdle: () => true,
 			modelRegistry: {
 				authStorage: { hasAuth: (p) => Boolean(creds[p]), get: (p) => creds[p] },
@@ -129,7 +134,7 @@ async function world({ room, start, fallbackFlag = true, poolFields, recovery, w
 			return results.filter(Boolean);
 		};
 		const pi = { on: (name, fn) => events.set(name, [...(events.get(name) ?? []), fn]),
-			registerCommand() {}, registerProvider() {}, registerTool() {},
+			registerCommand() {}, registerProvider: (name) => registered.push(name), registerTool() {},
 			sendUserMessage: () => { replays++; },
 			setModel: async next => { const previousModel = current; current = { provider: next.provider, id: next.id }; path_.push(current.provider);
 				await emit("model_select", { model: current, previousModel, source: "set" }); return true; },
@@ -139,7 +144,7 @@ async function world({ room, start, fallbackFlag = true, poolFields, recovery, w
 			contextEntries: [{ sourceEntry: { id: "user" }, messages: [{ role: "user" }] },
 				{ sourceEntry: { id }, messages: [{ role: "assistant" }] }], pendingMessages: [] } });
 		const c = {
-			notes, get model() { return current; }, get path() { return path_; }, get replays() { return replays; },
+			notes, registered, get model() { return current; }, get path() { return path_; }, get replays() { return replays; },
 			/** A new prompt: input (turn start) then before_agent_start. */
 			prompt: async (text, { input = true } = {}) => {
 				if (input) await emit("input", { text, source: "rpc" });
@@ -404,6 +409,63 @@ try {
 		});
 	});
 
+	const threeStage = { third: true, poolFields: { fallback: false, returnOnRefusal: false }, recovery: "off" };
+	await check("12 three stages: all four Claude slots precede GPT and Argon, then exhausted stop", () =>
+		world({ ...threeStage, room: MEMBERS, start: "anthropic",
+			weeklyResetDays: { anthropic: 4, "anthropic-2": 3, "anthropic-3": 2, "anthropic-4": 1 } }, async (c) => {
+			await c.prompt("fixed three-stage fixture");
+			assert.deepEqual(c.path, ["anthropic"], "healthy manual choice stays at send");
+			for (let i = 0; i < 4; i++) await c.fail(CLAUDE_429, `claude-${i}`);
+			assert.deepEqual(c.path, ["anthropic", "anthropic-4", "anthropic-3", "anthropic-2", "openai-codex"]);
+			assert.equal((await c.fail(CODEX_LIMIT, "gpt-forward"))[0]?.continue, true, "non-retryable GPT error continues forward without replay");
+			assert.deepEqual(c.model, { provider: "antigravity", id: ARGON });
+			assert.equal((await c.settle("gpt-forward")).length, 0, "one continuation per error");
+			assert.equal((await c.fail(ARGON_LIMIT, "argon-final")).length, 0);
+			assert.equal((await c.fail(ARGON_LIMIT, "argon-repeated")).length, 0);
+			assert.deepEqual(c.path, ["anthropic", "anthropic-4", "anthropic-3", "anthropic-2", "openai-codex", "antigravity"], "no exhausted retry or jump back");
+			assert.equal(c.replays, 0);
+			assert.deepEqual(c.registered, [], "external canonical provider registration is never replaced");
+		}));
+
+	await check("13 middle GPT refuses: Argon before any primary return, final return ranked and bounded", () =>
+		world({ ...threeStage, room: ["anthropic-2", "anthropic-4"], start: "openai-codex",
+			weeklyResetDays: { "anthropic-2": 4, "anthropic-4": 1 } }, async (c) => {
+			await c.prompt("fixed middle-stage fixture");
+			await c.prompt("manual GPT remains selected");
+			assert.deepEqual(c.path, ["openai-codex"], "no prompt moves despite primary room");
+			assert.equal((await c.fail(CODEX_LIMIT, "gpt-middle"))[0]?.continue, true);
+			assert.equal(c.model.provider, "antigravity", "Argon is ahead of primary even with room");
+			assert.equal((await c.fail(ARGON_LIMIT, "argon-return"))[0]?.continue, true);
+			assert.equal(c.model.provider, "anthropic-4", "final refusal returns to ranked primary");
+			await c.fail(CLAUDE_429, "claude-four");
+			assert.equal(c.model.provider, "anthropic-2");
+			assert.equal((await c.fail(CLAUDE_429, "claude-two")).length, 0);
+			assert.deepEqual(c.path, ["openai-codex", "antigravity", "anthropic-4", "anthropic-2"]);
+			assert.equal(c.replays, 0);
+		}));
+
+	await check("14 final Argon manual choice never moves at sends/non-limit errors; one upward return", async () => {
+		await world({ ...threeStage, room: ["anthropic-2", "anthropic-4"], start: "antigravity",
+			weeklyResetDays: { "anthropic-2": 4, "anthropic-4": 1 } }, async (c) => {
+			await c.prompt("manual final-stage fixture");
+			await c.prompt("another send stays on Argon");
+			for (const error of ["500 internal_server_error", "context too long", "Request aborted"])
+				assert.equal((await c.fail(error)).length, 0);
+			assert.deepEqual(c.path, ["antigravity"]);
+			assert.equal((await c.fail(ARGON_LIMIT, "final-return"))[0]?.continue, true);
+			assert.equal(c.model.provider, "anthropic-4");
+			await c.select({ provider: "antigravity", id: ARGON });
+			assert.equal((await c.fail(ARGON_LIMIT, "final-return-again")).length, 0, "unused primary room cannot bypass one-return guard");
+			assert.deepEqual(c.path, ["antigravity", "anthropic-4", "antigravity"]);
+			assert.equal(c.replays, 0);
+		});
+		const cfg = poolsConfig(threeStage);
+		assert.deepEqual(cfg.refusalFallback, { enabled: true, provider: "openai-codex", model: SOL }, "classifier remains GPT");
+		assert.equal(returnMod.returnCandidates(cfg, "openai-codex", () => true, new Set(), "refusal").length, 0);
+		assert.equal(returnMod.returnCandidates(cfg, "antigravity", () => true).length, 0, "no send-time return");
+		assert.equal(returnMod.returnCandidates(cfg, "antigravity", () => true, new Set(), "refusal").length, 4);
+	});
+
 	assert.ok(urls.every((u) => !/\/v1\/messages|\/responses|\/completions/.test(u)), `no model calls: ${urls.join(", ")}`);
-	console.log(`fallback-return: ${checked}/${onlyCase ? 1 : 11} checks passed${onlyCase ? ` (case ${onlyCase})` : ""}; no model calls${urls.length ? ` (${urls.length} refused quota fetches)` : ", no network"}`);
+	console.log(`fallback-return: ${checked}/${onlyCase ? 1 : 14} checks passed${onlyCase ? ` (case ${onlyCase})` : ""}; no model calls${urls.length ? ` (${urls.length} refused quota fetches)` : ", no network"}`);
 } finally { globalThis.fetch = realFetch; }

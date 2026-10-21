@@ -130,6 +130,7 @@ const SHORT_NAMES: Record<string, string> = {
 	"github-copilot": "Copilot",
 	"google-gemini-cli": "Gemini",
 	"google-antigravity": "Antigravity",
+	antigravity: "Antigravity",
 	minimax: "MiniMax",
 	"minimax-cn": "MiniMax CN",
 };
