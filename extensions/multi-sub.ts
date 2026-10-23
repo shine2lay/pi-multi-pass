@@ -73,7 +73,7 @@ import {
 	type SelectItem,
 } from "@earendil-works/pi-tui";
 // mine/fallback-return: chats on the fallback pool go back to the primary pool (PATCHES.md)
-import { fallbackRoleLine, ReturnContinuation, ReturnGuard, returnCandidates } from "./mine/fallback-return.ts";
+import { fallbackRoleLine, loopBackLine, refusalReturns, ReturnContinuation, ReturnGuard, returnCandidates } from "./mine/fallback-return.ts";
 // mine/model-fallback: model-scoped exhaustion for same-pool chain entries (PATCHES.md)
 import {
 	findApplicableChainForModel,
@@ -2277,6 +2277,13 @@ function parseHttpStatus(errorMessage: string): number | undefined {
 	return field ? Number(field[1]) : undefined;
 }
 
+// mine/loop-back: a usage-limit text pi never retries ("Codex error: The usage limit has been reached",
+// "You have hit your ChatGPT usage limit (promax plan). Try again in ~8780 min."): it has no HTTP status,
+// so piWillRetryTurn guesses a retry; pi's own retry list has no "usage limit".
+function isTerminalUsageLimit(errorMessage: string): boolean {
+	return /usage.?limit/i.test(errorMessage) && !/rate.?limit|too many requests|\b429\b|overloaded/i.test(errorMessage);
+}
+
 function piWillRetryTurn(errorMessage: string): boolean {
 	const status = parseHttpStatus(errorMessage);
 	if (status === undefined) return true;
@@ -2517,6 +2524,8 @@ class PoolManager {
 	private suppressNextStartTurn = false;
 	// mine/fallback-return: one step up per turn (keyed by the turn's cascade); continue after a mid-turn step.
 	private returnGuard = new ReturnGuard<FailoverCascadeState>();
+	/** mine/loop-back: handleError already told the chat no account is left (no second notice). */
+	exhaustedReported = false;
 	private returnedAtTurnStart = false;
 	readonly returnContinuation = new ReturnContinuation();
 	private traceEnabled = false;
@@ -2723,7 +2732,19 @@ class PoolManager {
 			return { pool, candidates, skips };
 		}
 
-		for (let chainIndex = applicable.index + 1; chainIndex < applicable.chain.entries.length; chainIndex++) {
+		// mine/loop-back: on a limit refusal the list is tried from the top (the current entry's place
+		// holds its own pool's other members), so later entries come after the first entries with room.
+		// Without it (a member that opted out, or the turn's one step up already used) only forward.
+		const entryCount = applicable.chain.entries.length;
+		const order = options?.loopBack
+			? Array.from({ length: entryCount }, (_, i) => i)
+			: Array.from({ length: Math.max(0, entryCount - applicable.index - 1) }, (_, i) => applicable.index + 1 + i);
+		const poolCandidates = options?.loopBack ? candidates.splice(0) : [];
+		for (const chainIndex of order) {
+			if (chainIndex === applicable.index) {
+				candidates.push(...poolCandidates);
+				continue;
+			}
 			const entry = applicable.chain.entries[chainIndex];
 			if (visitedChainIndexes.has(chainIndex)) {
 				skips.push({
@@ -3318,6 +3339,7 @@ class PoolManager {
 		lastUserPrompt: string | null,
 		config: MultiPassConfig,
 	): Promise<boolean> {
+		this.exhaustedReported = false;
 		if (!currentModel) return false;
 		// mine/signin-failover: a member's failed sign-in moves on like a limit refusal (checked first:
 		// its stack's line numbers can look like a 429).
@@ -3348,6 +3370,9 @@ class PoolManager {
 		}
 		}
 
+		// mine/loop-back: a limit refusal tries the list from the top, once per turn (the same guard
+		// as fallback-return, so a manual pick back down mid-turn is not bounced up again).
+		const loopBack = !signIn && this.returnGuard.allow(cascade) && refusalReturns(config, pool.name);
 		const plan = this.buildFailoverPlan(
 			currentModel,
 			config,
@@ -3355,6 +3380,7 @@ class PoolManager {
 			{
 				attemptedProviders: cascade.attemptedProviders,
 				visitedChainIndexes: cascade.visitedChainIndexes,
+				loopBack,
 			},
 		);
 
@@ -3391,6 +3417,7 @@ class PoolManager {
 
 		const nextCandidate = plan.candidates[0];
 		if (!nextCandidate) {
+			this.exhaustedReported = true; // mine/loop-back: one plain notice
 			ctx.ui.notify(formatFailoverExhausted(pool.name, currentModel.provider), "warning");
 			ctx.ui.setStatus("multi-pass", formatFailoverStatus(null, pool.name));
 			this.recordTrace(`failover exhausted in pool ${pool.name}`);
@@ -3404,6 +3431,7 @@ class PoolManager {
 				"warning",
 			);
 			this.recordTrace(`${nextCandidate.provider} skipped because model ${nextCandidate.modelId} is unavailable`);
+			this.exhaustedReported = true;
 			ctx.ui.notify(formatFailoverExhausted(pool.name, currentModel.provider), "warning");
 			ctx.ui.setStatus("multi-pass", formatFailoverStatus(null, pool.name));
 			return false;
@@ -3423,6 +3451,7 @@ class PoolManager {
 				"warning",
 			);
 			this.recordTrace(`${nextCandidate.provider} skipped because authentication was unavailable`);
+			this.exhaustedReported = true;
 			ctx.ui.notify(formatFailoverExhausted(pool.name, currentModel.provider), "warning");
 			ctx.ui.setStatus("multi-pass", formatFailoverStatus(null, pool.name));
 			return false;
@@ -3443,7 +3472,9 @@ class PoolManager {
 			: `pool ${nextCandidate.poolName} (${pool.strategy || "round-robin"})`;
 		this.recordTrace(`selected ${nextCandidate.provider} (${nextCandidate.modelId}) via ${route}`);
 
-		if (steppedUp && nextCandidate.poolName !== pool.name) {
+		const upward = steppedUp || (nextCandidate.source === "chain" && typeof nextCandidate.chainIndex === "number"
+			&& typeof plan.currentChainIndex === "number" && nextCandidate.chainIndex < plan.currentChainIndex);
+		if (upward && nextCandidate.poolName !== pool.name) {
 			// mine/fallback-return: pi does not retry the Codex usage-limit text; continue once, no replay.
 			this.returnGuard.mark(cascade);
 			const armed = this.returnContinuation.arm({ provider: currentModel.provider, id: currentModel.id },
@@ -3454,8 +3485,7 @@ class PoolManager {
 			const armed = this.signInContinuation.arm({ provider: currentModel.provider, id: currentModel.id },
 				{ provider: nextModel.provider, id: nextModel.id });
 			this.recordTrace(armed ? "continuing the turn after the sign-in failover" : "sign-in failover: turn not continued");
-		} else if (nextCandidate.source === "chain" &&
-			(/^Codex error: The usage limit has been reached\b/i.test(errorMessage) || !piWillRetryTurn(errorMessage))) {
+		} else if (nextCandidate.source === "chain" && (isTerminalUsageLimit(errorMessage) || !piWillRetryTurn(errorMessage))) {
 			// mine/antigravity-limits: raw Codex limit has no status; piWillRetryTurn assumes retry.
 			// GPT's non-retryable limit must continue forward to the
 			// next chain entry too, without replaying the prompt or spending the one upward return.
@@ -4975,6 +5005,8 @@ function formatPoolStatusLines(
 	try { // mine/fallback-return
 		const role = fallbackRoleLine(loadGlobalConfig(), pool.name);
 		if (role) lines.push(role);
+		const loop = loopBackLine(loadGlobalConfig(), pool.name); // mine/loop-back
+		if (loop) lines.push(loop);
 	} catch { /* status only */ }
 	if (pool.selectorScript) {
 		lines.push(`selector: ${pool.selectorScript}`);
@@ -5083,6 +5115,8 @@ interface FailoverSkip {
 interface FailoverPlanOptions {
 	attemptedProviders?: Set<string>;
 	visitedChainIndexes?: Set<number>;
+	/** mine/loop-back: walk the chain from the top (wrapping past the end), not only forward. */
+	loopBack?: boolean;
 }
 
 interface FailoverPlan {
@@ -6413,7 +6447,8 @@ export default function multiSub(pi: ExtensionAPI) {
 			}),
 		);
 
-		if (!rotated && isRateLimitError(assistantMsg.errorMessage) && !parseSignInFailure(assistantMsg.errorMessage)) {
+		if (!rotated && !poolManager.exhaustedReported && isRateLimitError(assistantMsg.errorMessage)
+			&& !parseSignInFailure(assistantMsg.errorMessage)) {
 			const pool = ctx.model
 				? poolManager.getPoolForProvider(ctx.model.provider)
 				: undefined;

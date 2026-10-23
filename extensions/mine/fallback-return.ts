@@ -56,6 +56,27 @@ export function primaryTarget(config: ReturnConfig, fromPool: string): ReturnTar
 	return undefined; // "fallback": true without a chain: no known primary model, so no return
 }
 
+/** mine/loop-back: does a limit refusal on this pool go back up the list? An explicit returnOnRefusal
+ * decides; otherwise every pool below a chain's primary does (owner 2026-10-23, rm-7d437b26:
+ * "loop back to first subscription in the list"), not only the chain's last pool. */
+export function refusalReturns(config: ReturnConfig, name: string): boolean {
+	const pool = enabledPool(config, name);
+	if (!pool) return false;
+	return pool.returnOnRefusal ?? (isFallbackPool(config, name) || Boolean(primaryTarget(config, name)));
+}
+
+/** One /pool status line: the order a limit refusal on this pool tries, top of the list first. */
+export function loopBackLine(config: ReturnConfig, poolName: string): string | undefined {
+	if (!enabledPool(config, poolName)) return undefined;
+	const chain = config.chains.find((c) => c.enabled && entriesOf(c).some((entry) => entry.pool === poolName));
+	if (!chain) return undefined;
+	const order = entriesOf(chain).map((entry) => entry.pool).filter((pool, i, all) => all.indexOf(pool) === i).join(" -> ");
+	const first = entriesOf(chain)[0]?.pool === poolName;
+	return first || refusalReturns(config, poolName)
+		? `loop: a limit refusal goes to the first account with room in ${order}, wrapping to the top; each account once per turn; never at a send`
+		: `loop: off for this pool (returnOnRefusal: false); a limit refusal only moves on down ${order}`;
+}
+
 /** The pool a provider is in (last match, as the rest of multi-sub resolves it). */
 export function poolOf(config: ReturnConfig, provider: string): ReturnPool | undefined {
 	return config.pools.findLast((p) => p.enabled && p.members.includes(provider));
@@ -72,7 +93,7 @@ export function returnCandidates(
 	const from = poolOf(config, currentProvider);
 	if (!from) return [];
 	const isFallback = isFallbackPool(config, from.name);
-	if (!(trigger === "refusal" ? from.returnOnRefusal ?? isFallback : isFallback)) return [];
+	if (!(trigger === "refusal" ? refusalReturns(config, from.name) : isFallback)) return [];
 	const target = primaryTarget(config, from.name);
 	if (!target) return [];
 	const primary = enabledPool(config, target.poolName)!;
@@ -137,7 +158,7 @@ export function fallbackRoleLine(config: ReturnConfig, poolName: string): string
 	const pool = enabledPool(config, poolName);
 	if (!pool) return undefined;
 	const isFallback = isFallbackPool(config, poolName);
-	const onRefusal = pool.returnOnRefusal ?? isFallback;
+	const onRefusal = refusalReturns(config, poolName);
 	if (!isFallback && !onRefusal) return undefined;
 	const target = primaryTarget(config, poolName);
 	if (!isFallback) return target
