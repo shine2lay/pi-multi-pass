@@ -16,6 +16,7 @@
  */
 import { MAX_CONTINUES_PER_PROMPT, type ContinueBoundary, type ContinueMessage, type ContinueModel,
 	type ContinueResult } from "./signin-failover.ts";
+import { isFreshInput } from "./fresh-input.ts";
 
 export interface ReturnPool { name: string; members: string[]; enabled: boolean; fallback?: boolean; returnOnRefusal?: boolean }
 export interface ReturnChainEntry { pool: string; model: string; enabled?: boolean }
@@ -145,8 +146,7 @@ export class ReturnContinuation {
 		if (boundary.context.pendingMessages.length) return undefined; // new input continues the run itself
 		const visible = boundary.context.contextEntries.filter((entry) => entry.messages.length);
 		if (visible.at(-1)?.sourceEntry.id !== failed.entryId) return undefined;
-		const priorRole = visible.slice(0, -1).at(-1)?.messages.at(-1)?.role;
-		if (priorRole !== "user" && priorRole !== "toolResult") return undefined;
+		if (!isFreshInput(visible.slice(0, -1).at(-1)?.messages.at(-1)?.role)) return undefined; // mine/continue-after-note
 		this.used += 1;
 		const edit = { type: "context_edit" as const, targetId: failed.entryId, replacement: null };
 		return { entries: [...(boundary.entries ?? []), edit], continue: true };

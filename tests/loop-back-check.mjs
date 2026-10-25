@@ -33,9 +33,10 @@ const ref = process.env.LOOP_BACK_SOURCE_REF;
 const show = (file) => execFileSync("git", ["show", `${ref}:${file}`], { cwd: root, encoding: "utf8" });
 const sourceCode = ref ? show("extensions/multi-sub.ts") : fs.readFileSync(path.join(root, "extensions/multi-sub.ts"), "utf8");
 const returnMod = ref
+	// A data: module can't resolve relative imports: point each ./<module>.ts at this tree's copy.
 	? await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(show("extensions/mine/fallback-return.ts"),
-		{ mode: "strip", disableExperimentalWarning: true }).replace('"./signin-failover.ts"',
-		JSON.stringify(pathToFileURL(path.join(root, "extensions/mine/signin-failover.ts")).href))).toString("base64")}`)
+		{ mode: "strip", disableExperimentalWarning: true }).replace(/"\.\/([\w-]+\.ts)"/g, (_, file) =>
+		JSON.stringify(pathToFileURL(path.join(root, "extensions/mine", file)).href))).toString("base64")}`)
 	: await import("../extensions/mine/fallback-return.ts");
 
 // Live refusal texts (scan-chat-accounts.py, 2026-10-23 07:49-08:59 PDT).

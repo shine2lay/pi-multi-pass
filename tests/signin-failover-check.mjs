@@ -113,6 +113,27 @@ try {
 		assert.equal(c.arm(from, to), false, "bounded per prompt");
 	});
 
+	// Live shape 2026-10-25 (Ops #553/#554): the prompt, then a Board note (custom_message, role "custom";
+	// pi sends it to the model as user input), then the failed reply.
+	await check("continuation: a Board or role note (custom) before the failed reply continues once; assistant never", () => {
+		const failed = { role: "assistant", provider: "anthropic-3", model: model.id, stopReason: "error", errorMessage: liveError() };
+		const boundary = (between) => ({ outcome: "error", continue: false, entries: [], context: {
+			contextEntries: [{ sourceEntry: { id: "user" }, messages: [{ role: "user" }] },
+				{ sourceEntry: { id: "between" }, messages: [{ role: between }] },
+				{ sourceEntry: { id: "failed" }, messages: [{ role: "assistant" }] }], pendingMessages: [] } });
+		const from = { provider: "anthropic-3", id: model.id }, to = { provider: "anthropic-4", id: model.id };
+		const c = new signin.SignInContinuation();
+		c.observe(failed, "failed", from);
+		assert.equal(c.arm(from, to), true);
+		assert.deepEqual(c.settle(boundary("custom"), to, false),
+			{ entries: [{ type: "context_edit", targetId: "failed", replacement: null }], continue: true }, "a note is fresh input");
+		assert.equal(c.settle(boundary("custom"), to, false), undefined, "once");
+		for (const role of ["assistant", "system"]) {
+			c.observe(failed, "failed", from); c.arm(from, to);
+			assert.equal(c.settle(boundary(role), to, false), undefined, `${role} before the failed reply never continues`);
+		}
+	});
+
 	// Run the real multiSub registrations with fake host state: a chat that failed over onto
 	// anthropic-3 meets the live sign-in error. Boundary previews carry only entry IDs and roles.
 	async function integration(sourceCode) {

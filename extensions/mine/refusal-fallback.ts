@@ -2,6 +2,8 @@
  * No prompt rewriting, transport replacement, account exhaustion or user replay.
  * Pi's append-only context edit omits only the incomplete refused response.
  */
+import { isFreshInput } from "./fresh-input.ts";
+
 export type RefusalFallbackConfig =
 	| { enabled: false }
 	| { enabled: true; provider: string; model: string };
@@ -90,9 +92,8 @@ export class RefusalFallback {
 		if (boundary.context.pendingMessages.length) return;
 		const visible = boundary.context.contextEntries.filter(entry => entry.messages.length);
 		if (visible.at(-1)?.sourceEntry.id !== pending.entryId) return;
-		// Once the refused response is omitted, Pi needs a user/tool-result tail.
-		const priorRole = visible.slice(0, -1).at(-1)?.messages.at(-1)?.role;
-		if (priorRole !== "user" && priorRole !== "toolResult") return;
+		// Once the refused response is omitted, Pi needs a user, tool-result or custom-note tail.
+		if (!isFreshInput(visible.slice(0, -1).at(-1)?.messages.at(-1)?.role)) return; // mine/continue-after-note
 		this.spent = true;
 		const config = host.config().refusalFallback;
 		if (!config?.enabled) return;

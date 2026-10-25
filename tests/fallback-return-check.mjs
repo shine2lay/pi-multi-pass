@@ -3,6 +3,8 @@
 // Plain node; no network (fetch throws), no real auth.json, fake credentials only, no model calls.
 // FALLBACK_RETURN_SOURCE_REF=<ref> loads BOTH that ref's hooks and fallback-return module.
 // On 33ca3a1, cases 1-8 pass; case 9 fails because the refusal-only chat stays on openai-codex.
+// On e48673b, cases 1-14 pass; case 15 fails: a Board or role note (role "custom") between the prompt
+// and the refused reply blocks the one continuation (Ops #555).
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -35,15 +37,16 @@ const returnSource = ref
 	? execFileSync("git", ["show", `${ref}:extensions/mine/fallback-return.ts`], { cwd: root, encoding: "utf8" })
 	: undefined;
 const returnMod = returnSource
+	// A data: module can't resolve relative imports: point each ./<module>.ts at this tree's copy.
 	? await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(returnSource,
-		{ mode: "strip", disableExperimentalWarning: true }).replace('"./signin-failover.ts"',
-		JSON.stringify(pathToFileURL(path.join(root, "extensions/mine/signin-failover.ts")).href))).toString("base64")}`)
+		{ mode: "strip", disableExperimentalWarning: true }).replace(/"\.\/([\w-]+\.ts)"/g, (_, file) =>
+		JSON.stringify(pathToFileURL(path.join(root, "extensions/mine", file)).href))).toString("base64")}`)
 	: await import("../extensions/mine/fallback-return.ts");
 
 // The live 2026-10-11 text from the stuck chats (openai-codex, gpt-6.1-sol).
 const CODEX_LIMIT = "Codex error: The usage limit has been reached";
 const CLAUDE_429 = "429 rate_limit_error: This request would exceed your account's rate limit.";
-const CLAUDE = "claude-opus-5-5", SOL = "gpt-6.1-sol", ARGON = "gemini-4-argon";
+const CLAUDE = "claude-opus-5-5", SOL = "gpt-6.1-sol", ASTRA = "gpt-6-astra", ARGON = "gemini-4-argon";
 const ARGON_LIMIT = "429 quota exhausted";
 const MEMBERS = ["anthropic", "anthropic-2", "anthropic-3", "anthropic-4"];
 
@@ -52,7 +55,7 @@ const urls = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url) => { urls.push(String(url)); throw new Error("Network forbidden in fallback-return checks"); };
 const onlyCase = process.env.FALLBACK_RETURN_CASE;
-if (onlyCase && !/^(?:[1-9]|1[0-4])$/.test(onlyCase)) throw new Error("FALLBACK_RETURN_CASE must be 1-14");
+if (onlyCase && !/^(?:[1-9]|1[0-5])$/.test(onlyCase)) throw new Error("FALLBACK_RETURN_CASE must be 1-15");
 const check = async (name, fn) => {
 	if (onlyCase && name.split(" ")[0] !== onlyCase) return;
 	try { await fn(); checked++; console.log(`ok fallback-return: ${name}`); }
@@ -99,7 +102,7 @@ function writeQuota(temp, room, weeklyResetDays = {}) {
 // The owner's live routing shape: no prompt recovery, and the GPT pool returns on refusal only.
 const liveRefusal = { poolFields: { fallback: false, returnOnRefusal: true }, recovery: "off" };
 
-async function world({ room, start, fallbackFlag = true, poolFields, recovery, weeklyResetDays, third }, run) {
+async function world({ room, start, startModel, fallbackFlag = true, poolFields, recovery, weeklyResetDays, third }, run) {
 	modelFallback.clearModelExhaustion(); // module-wide state: each fake chat starts clean
 	const temp = fs.mkdtempSync(path.join(tmpdir(), "pi-fallback-return-"));
 	try {
@@ -118,7 +121,7 @@ async function world({ room, start, fallbackFlag = true, poolFields, recovery, w
 			process: { env: {}, pid: process.pid }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,
 			fetch: globalThis.fetch,
 		});
-		let current = { provider: start, id: start === "openai-codex" ? SOL : start === "antigravity" ? ARGON : CLAUDE };
+		let current = { provider: start, id: startModel ?? (start === "openai-codex" ? SOL : start === "antigravity" ? ARGON : CLAUDE) };
 		const path_ = [current.provider];
 		let replays = 0;
 		const events = new Map(), notes = [], registered = [];
@@ -140,8 +143,10 @@ async function world({ room, start, fallbackFlag = true, poolFields, recovery, w
 				await emit("model_select", { model: current, previousModel, source: "set" }); return true; },
 		};
 		production.multiSub(pi);
-		const boundary = (id) => ({ outcome: "error", continue: false, entries: [], context: {
+		// between: roles of context messages after the user's prompt and before the failed reply.
+		const boundary = (id, between = []) => ({ outcome: "error", continue: false, entries: [], context: {
 			contextEntries: [{ sourceEntry: { id: "user" }, messages: [{ role: "user" }] },
+				...between.map((role, i) => ({ sourceEntry: { id: `between-${i}` }, messages: [{ role }] })),
 				{ sourceEntry: { id }, messages: [{ role: "assistant" }] }], pendingMessages: [] } });
 		const c = {
 			notes, registered, get model() { return current; }, get path() { return path_; }, get replays() { return replays; },
@@ -150,7 +155,7 @@ async function world({ room, start, fallbackFlag = true, poolFields, recovery, w
 				if (input) await emit("input", { text, source: "rpc" });
 				await emit("before_agent_start", { prompt: text });
 			},
-			settle: (id) => emit("agent_before_settle", boundary(id)),
+			settle: (id, between) => emit("agent_before_settle", boundary(id, between)),
 			// Test-only external selection through the existing API; no new input or state reset.
 			select: (model) => pi.setModel(model),
 			/** Real ordinary saves/edits on an isolated config; also runs unchanged on old source. */
@@ -217,11 +222,11 @@ async function world({ room, start, fallbackFlag = true, poolFields, recovery, w
 				assert.equal(pool.returnOnRefusal, undefined, "explicit replacement drops returnOnRefusal");
 			},
 			/** The current member refuses; returns what settle decided. */
-			fail: async (error, id = `failed-${path_.length}`) => {
+			fail: async (error, id = `failed-${path_.length}`, between) => {
 				const message = { role: "assistant", provider: current.provider, model: current.id, stopReason: "error", errorMessage: error };
 				await emit("turn_end", { message, messageEntryId: id });
 				await emit("agent_end", { messages: [message] });
-				return emit("agent_before_settle", boundary(id));
+				return emit("agent_before_settle", boundary(id, between));
 			},
 		};
 		await emit("session_start", {});
@@ -466,6 +471,28 @@ try {
 		assert.equal(returnMod.returnCandidates(cfg, "antigravity", () => true, new Set(), "refusal").length, 4);
 	});
 
+	// Live 2026-10-25 (Ops #553/#554): a queued task's first turn on gpt-6-astra: the prompt, then a
+	// Board note (custom_message "board", role "custom"), then the Codex usage-limit refusal.
+	await check("15 a Board or role note before the refused first reply still continues once on Claude", async () => {
+		const live = { ...liveRefusal, third: true, room: ["anthropic-3"], start: "openai-codex", startModel: ASTRA };
+		await world(live, async (c) => {
+			await c.prompt("offline synthetic request");
+			const settled = await c.fail(CODEX_LIMIT, "astra-refused", ["custom"]);
+			assert.deepEqual(c.model, { provider: "anthropic-3", id: CLAUDE }, `path ${c.path.join(" -> ")}`);
+			assert.deepEqual(settled, [{ entries: [{ type: "context_edit", targetId: "astra-refused", replacement: null }], continue: true }],
+				"the note is fresh input: the run continues once on Claude");
+			assert.equal((await c.settle("astra-refused", ["custom"])).length, 0, "only once");
+			assert.equal(c.replays, 0, "no prompt replay");
+		});
+		await world(live, async (c) => {
+			await c.prompt("offline synthetic request");
+			assert.equal((await c.fail(CODEX_LIMIT, "after-reply", ["assistant"])).length, 0,
+				"an assistant message right before the failed reply still never continues");
+			assert.equal(c.model.provider, "anthropic-3", "the account move itself is unchanged");
+			assert.equal(c.replays, 0);
+		});
+	});
+
 	assert.ok(urls.every((u) => !/\/v1\/messages|\/responses|\/completions/.test(u)), `no model calls: ${urls.join(", ")}`);
-	console.log(`fallback-return: ${checked}/${onlyCase ? 1 : 14} checks passed${onlyCase ? ` (case ${onlyCase})` : ""}; no model calls${urls.length ? ` (${urls.length} refused quota fetches)` : ", no network"}`);
+	console.log(`fallback-return: ${checked}/${onlyCase ? 1 : 15} checks passed${onlyCase ? ` (case ${onlyCase})` : ""}; no model calls${urls.length ? ` (${urls.length} refused quota fetches)` : ", no network"}`);
 } finally { globalThis.fetch = realFetch; }

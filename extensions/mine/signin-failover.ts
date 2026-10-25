@@ -11,6 +11,7 @@
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isFreshInput } from "./fresh-input.ts";
 
 export type SignInFailureKind = "refused" | "unreachable";
 export interface SignInFailure {
@@ -194,8 +195,7 @@ export class SignInContinuation {
 		if (boundary.context.pendingMessages.length) return undefined;
 		const visible = boundary.context.contextEntries.filter((entry) => entry.messages.length);
 		if (visible.at(-1)?.sourceEntry.id !== failed.entryId) return undefined;
-		const priorRole = visible.slice(0, -1).at(-1)?.messages.at(-1)?.role;
-		if (priorRole !== "user" && priorRole !== "toolResult") return undefined;
+		if (!isFreshInput(visible.slice(0, -1).at(-1)?.messages.at(-1)?.role)) return undefined; // mine/continue-after-note
 		this.used += 1;
 		const edit = { type: "context_edit" as const, targetId: failed.entryId, replacement: null };
 		return { entries: [...(boundary.entries ?? []), edit], continue: true };

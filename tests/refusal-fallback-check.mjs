@@ -98,6 +98,20 @@ try {
     assert.equal((await f.controller.retry(boundary("toolResult"), f.host)).continue, true);
     assert.equal(f.switches(), 1);
   });
+  // Ops #555: a Board or role note (custom_message, role "custom") is user input to the model.
+  await check("a Board or role note (custom) before the refusal continues once; assistant never", async () => {
+    const f = fixture(), event = boundary("custom");
+    const result = await f.controller.retry(event, f.host);
+    assert.equal(result?.continue, true, "a note is fresh input");
+    assert.equal(result.entries[0].targetId, "refused");
+    assert.equal(f.switches(), 1);
+    assert.equal(await f.controller.retry(event, f.host), undefined, "once");
+    for (const role of ["assistant", "system"]) {
+      const g = fixture();
+      assert.equal(await g.controller.retry(boundary(role), g.host), undefined, `${role} never continues`);
+      assert.equal(g.switches(), 0, role);
+    }
+  });
   await check("fallback refusal or later Claude refusal cannot loop", async () => {
     const f = fixture();
     await f.controller.retry(boundary(), f.host);
