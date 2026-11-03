@@ -20,6 +20,7 @@ import * as fallback from "../extensions/mine/model-fallback.ts";
 import * as countdown from "../extensions/mine/reset-countdown.ts";
 import * as subsLimits from "../extensions/mine/subs-limits.ts";
 import * as fallbackReturn from "../extensions/mine/fallback-return.ts";
+import { isRetryableAssistantError } from "./support/pi-retry-classifier.mjs";
 
 const { ALLOWED_SUBS_ENV, envAllowedSubs, withEnvAllowedSubs } = envAllowed;
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -85,7 +86,7 @@ try {
 				.replace("export default function multiSub", "function multiSub");
 			const production = runInNewContext(`${executable}\n;({multiSub});`, {
 				...fs, ...path, ...envAllowed, ...fallbackReturn, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting,
-				...anthropicQuota, ...limits, ...reset, ...fallback, ...countdown, ...subsLimits,
+				...anthropicQuota, ...limits, ...reset, ...fallback, ...countdown, ...subsLimits, isRetryableAssistantError,
 				Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
 				readStoredCredential: (provider) => creds[provider],
 				builtinProviders: () => [], getModels: (provider) => provider === "openai-codex" ? [{ id: "gpt-6.1-sol" }] : [model],

@@ -64,6 +64,7 @@ import {
 } from "@earendil-works/pi-ai/providers/all";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai/oauth";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai"; // mine/chatgpt-limit-continue
 import {
 	Container,
 	Key,
@@ -2283,8 +2284,6 @@ function isRateLimitError(errorMessage: string): boolean {
 	return RATE_LIMIT_PATTERNS.some((p) => p.test(errorMessage));
 }
 
-const PI_RETRYABLE_STATUSES = new Set([408, 409, 429]);
-
 function parseHttpStatus(errorMessage: string): number | undefined {
 	const leading = errorMessage.match(/^\s*(?:Error:\s*)?(\d{3})\b/);
 	if (leading) return Number(leading[1]);
@@ -2294,15 +2293,20 @@ function parseHttpStatus(errorMessage: string): number | undefined {
 
 // mine/loop-back: a usage-limit text pi never retries ("Codex error: The usage limit has been reached",
 // "You have hit your ChatGPT usage limit (promax plan). Try again in ~8780 min."): it has no HTTP status,
-// so piWillRetryTurn guesses a retry; pi's own retry list has no "usage limit".
+// so piWillRetryTurn's old status guess said retry; pi's own retry list has no "usage limit" (piWillRetryTurn
+// asks that list since mine/chatgpt-limit-continue; this check stays as a second guard).
 function isTerminalUsageLimit(errorMessage: string): boolean {
 	return /usage.?limit/i.test(errorMessage) && !/rate.?limit|too many requests|\b429\b|overloaded/i.test(errorMessage);
 }
 
+// mine/chatgpt-limit-continue: ask pi's own retry classifier (the one AgentSession uses) instead of guessing
+// from the HTTP status. The Sign in with ChatGPT limit, "OpenAI API error (429): {...
+// subscription_sharing_usage_limit_exceeded...}", carries a 429, so the guess said "pi retries"; pi lists
+// that code as never retried, and a move down the chain stopped the turn. The classifier reads only
+// stopReason and errorMessage. An empty or non-string message is one pi never retries.
 function piWillRetryTurn(errorMessage: string): boolean {
-	const status = parseHttpStatus(errorMessage);
-	if (status === undefined) return true;
-	return status >= 500 || PI_RETRYABLE_STATUSES.has(status);
+	if (typeof errorMessage !== "string" || errorMessage.length === 0) return false;
+	return isRetryableAssistantError({ stopReason: "error", errorMessage } as Parameters<typeof isRetryableAssistantError>[0]);
 }
 
 // ==========================================================================
@@ -3501,7 +3505,7 @@ class PoolManager {
 				{ provider: nextModel.provider, id: nextModel.id });
 			this.recordTrace(armed ? "continuing the turn after the sign-in failover" : "sign-in failover: turn not continued");
 		} else if (nextCandidate.source === "chain" && (isTerminalUsageLimit(errorMessage) || !piWillRetryTurn(errorMessage))) {
-			// mine/antigravity-limits: raw Codex limit has no status; piWillRetryTurn assumes retry.
+			// mine/antigravity-limits: raw Codex limit has no status; piWillRetryTurn assumed retry before mine/chatgpt-limit-continue.
 			// GPT's non-retryable limit must continue forward to the
 			// next chain entry too, without replaying the prompt or spending the one upward return.
 			this.returnContinuation.arm({ provider: currentModel.provider, id: currentModel.id },

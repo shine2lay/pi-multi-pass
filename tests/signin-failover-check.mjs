@@ -24,6 +24,7 @@ import * as countdown from "../extensions/mine/reset-countdown.ts";
 import * as subsLimits from "../extensions/mine/subs-limits.ts";
 import * as envAllowed from "../extensions/mine/env-allowed-subs.ts";
 import * as fallbackReturn from "../extensions/mine/fallback-return.ts";
+import { isRetryableAssistantError } from "./support/pi-retry-classifier.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
@@ -148,7 +149,7 @@ try {
 				.replace("export default function multiSub", "function multiSub");
 			const production = runInNewContext(`${executable}\n;({multiSub, formatPoolStatusLines});`, {
 				...fs, ...path, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
-				...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...envAllowed, ...fallbackReturn,
+				...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...envAllowed, ...fallbackReturn, isRetryableAssistantError,
 				Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
 				readStoredCredential: (provider) => creds[provider],
 				builtinProviders: () => [], getModels: () => [model],

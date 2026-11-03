@@ -18,6 +18,7 @@ import * as refusal from "../extensions/mine/refusal-fallback.ts";
 import * as signin from "../extensions/mine/signin-failover.ts";
 import * as envAllowed from "../extensions/mine/env-allowed-subs.ts";
 import * as fallbackReturn from "../extensions/mine/fallback-return.ts";
+import { isRetryableAssistantError } from "./support/pi-retry-classifier.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = fs.mkdtempSync(path.join(tmpdir(), "pi-quota-routing-"));
@@ -188,6 +189,7 @@ try {
     setModel: async next => { const previousModel = model; model = next; chosen.push(next.provider); await emit("model_select", { model, previousModel, source: "set" }); return true; } };
   const production = runInNewContext(`${executable}\n;({multiSub});`, {
     ...fs, ...path, ...qs, ...policy, ...routing, ...anthropic, ...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...refusal, ...signin, ...envAllowed, ...fallbackReturn,
+    isRetryableAssistantError,
     Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
     builtinProviders: () => [], getModels: () => ["model-alpha", "model-beta", "model-gamma"].map(id => ({ id })),
     process: { env: {} }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,
@@ -200,7 +202,10 @@ try {
     },
   });
   const response = async headers => { await emit("before_provider_request", { payload: {} }); await emit("after_provider_response", { status: 200, headers }); };
-  const fail = async () => emit("agent_end", { messages: [{ role: "assistant", stopReason: "error", errorMessage: "usage limit reached" }] });
+  // A Claude limit as pi-ai reports it: pi retries a 429 rate_limit_error itself (mine/chatgpt-limit-continue: the
+  // old placeholder "usage limit reached" is a text pi never retries, so it no longer stood for this case).
+  const claudeLimit = '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit."}}';
+  const fail = async () => emit("agent_end", { messages: [{ role: "assistant", stopReason: "error", errorMessage: claudeLimit }] });
   fallback.clearModelExhaustion();
   production.multiSub(pi);
   await emit("session_start");
