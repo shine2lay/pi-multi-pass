@@ -7,8 +7,9 @@
 // Runs the real multi-sub.ts through support/chain-world.mjs on the live chain (support/live-chain.mjs), with
 // models as pi has them: anthropic and openai built in, antigravity only in the registry. Plain node; no
 // network (fetch throws), fake credentials only, no model calls.
-// ANTIGRAVITY_ENTRIES_SOURCE_REF=<ref> loads that ref's multi-sub.ts and fallback-return.ts (37df0b7: a-d fail,
-// with the live "2 invalid | 2/4 usable now"; e passes, as it tests this tree's pool-models.ts).
+// ANTIGRAVITY_ENTRIES_SOURCE_REF=<ref> loads that ref's multi-sub.ts and fallback-return.ts (37df0b7: a-e fail,
+// d with the live "2 invalid | 2/4 usable now"; f passes, as it tests this tree's pool-models.ts; on 248a173, the
+// models commit, only e fails: its /pool status listed skipped entries as healthy).
 import assert from "node:assert/strict";
 import { blockNetwork, chainWorld, continued, loadSources } from "./support/chain-world.mjs";
 import { ANTIGRAVITY_CLAUDE, ARGON, ARGON_MODEL, ARGON_QUOTA, CHATGPT_LIMIT, CLAUDE, GPT, LIVE_BUILTIN, LIVE_CONFIG,
@@ -28,6 +29,16 @@ async function chainListLine(c) {
 	const shown = c.selects.find((s) => s.title === "Chains");
 	assert.ok(shown, `/pool chain list showed a Chains list (notes: ${c.notes.join(" | ")})`);
 	return shown.items.find((line) => line.startsWith("claude-then-sol |"));
+}
+
+/** The loop: lines /pool status shows, one per pool in the chain. */
+async function poolStatusLoopLines(c) {
+	await c.command("pool", "status");
+	const shown = c.selects.find((s) => s.title === "Pool Status");
+	assert.ok(shown, `/pool status showed a Pool Status list (notes: ${c.notes.join(" | ")})`);
+	const loops = shown.items.filter((line) => line.startsWith("loop:"));
+	assert.equal(loops.length, 3, `one loop: line per chain pool:\n${shown.items.join("\n")}`);
+	return loops;
 }
 
 /** One refusal in a turn of its own: the chat lands on `want` and the turn continues once, no prompt replay. */
@@ -65,7 +76,30 @@ const cases = [
 			const line = await chainListLine(c);
 			assert.equal(line, "claude-then-sol | 4 entries | enabled | 4/4 usable now");
 		})],
-	["e pool models: built-in first, then registry models of the base provider or a member, each id once", () => {
+	["e /pool status loop: lines mark the entries the rotation skips, so a broken loop never reads healthy", async () => {
+		await world({}, async (c) => {
+			for (const line of await poolStatusLoopLines(c)) {
+				assert.match(line, / in claude-real -> chatgpt-fallback -> antigravity-fallback, wrapping to the top;/, line);
+				assert.doesNotMatch(line, /invalid/, line);
+			}
+		});
+		// As live before this patch: antigravity in no list pi-multi-pass reads -> both of its entries skipped.
+		await world({ registered: [] }, async (c) => {
+			for (const line of await poolStatusLoopLines(c)) {
+				assert.match(line, / -> antigravity-fallback \(invalid, skipped\), wrapping to the top;/, line);
+				assert.match(line, /; skips invalid entries: antigravity-fallback -> gemini-4-argon \(invalid model: no selectable models for antigravity\), antigravity-fallback -> claude-opus-5-5 \(invalid model: no selectable models for antigravity\)$/, line);
+			}
+		});
+		const config = structuredClone(LIVE_CONFIG);
+		config.chains[0].entries.splice(2, 0, { pool: "antigravity-fallback", model: UNLISTED, enabled: true });
+		await world({ config }, async (c) => {
+			for (const line of await poolStatusLoopLines(c)) {
+				assert.match(line, / -> antigravity-fallback \(1 of 3 entries invalid\), wrapping to the top;/, line);
+				assert.match(line, new RegExp(`; skips invalid entries: antigravity-fallback -> ${UNLISTED} \\(invalid model: ${UNLISTED} unavailable for antigravity-fallback\\)$`), line);
+			}
+		});
+	}],
+	["f pool models: built-in first, then registry models of the base provider or a member, each id once", () => {
 		const warnings = [];
 		const catalog = new PoolModelCatalog((provider) => ({ anthropic: [CLAUDE, "claude-opus-5"] })[provider] ?? [],
 			(message) => warnings.push(message));

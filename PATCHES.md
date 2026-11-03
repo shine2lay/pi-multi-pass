@@ -705,18 +705,26 @@ stays invalid. Chain validity, `/pool chain list|status`, chain create and the p
 read it, so the Antigravity entries are usable: a ChatGPT limit with no Claude room moves to
 Argon and the turn continues once (chatgpt-limit-continue), an Argon quota moves on to Claude on
 Antigravity. No change to pools, chains, order, `returnOnRefusal` or recovery.
+Second commit, so a broken loop can't read healthy: the `/pool status` `loop:` line (loop-back's
+`loopBackLine`, optional `entryIssue`) marks every entry `getChainEntryIssue` rejects, e.g.
+`antigravity-fallback (invalid, skipped)` or `(1 of 3 entries invalid)` in the order, then `; skips
+invalid entries: <pool> -> <model> (<issue>)`. Before, it listed the pools whatever the rotation
+skipped, which is how the live check passed while both Antigravity entries were skipped.
 **Hooks in `extensions/multi-sub.ts`:** the `PoolModelCatalog` import, `poolModels` beside
-`getSelectableModelsForPool` (its body), and one `useRegistry` line at the top of `session_start`.
-**Files:** `extensions/mine/pool-models.ts`; `tests/antigravity-chain-entries-check.mjs`;
+`getSelectableModelsForPool` (its body), one `useRegistry` line at the top of `session_start`, and
+`formatPoolStatusLines` passing `getChainEntryIssue` to `loopBackLine`.
+**Files:** `extensions/mine/pool-models.ts`; `extensions/mine/fallback-return.ts` (`loopBackLine`);
+`tests/antigravity-chain-entries-check.mjs`;
 `tests/support/live-chain.mjs` (the live chain, its models and live provider texts; shared with
 `tests/chatgpt-limit-continue-check.mjs`); `tests/support/chain-world.mjs` takes `builtin`
 (provider -> ids, as `getModels`) and `registered` (registry-only models) instead of one model list
 for every provider, which is how the old harness hid this, and gives `getAll`, `selects` and
 `command`. `tests/loop-back-check.mjs` uses that split. The checks that run the real `multi-sub.ts`
 in a VM put `PoolModelCatalog` in its context.
-**Test:** `tests/antigravity-chain-entries-check.mjs` (a-e; no model calls).
-`ANTIGRAVITY_ENTRIES_SOURCE_REF=37df0b7 node tests/antigravity-chain-entries-check.mjs`: a-d fail
-(d shows the live "2 invalid | 2/4 usable now"); e, the module's own cases, passes.
+**Test:** `tests/antigravity-chain-entries-check.mjs` (a-f; no model calls).
+`ANTIGRAVITY_ENTRIES_SOURCE_REF=37df0b7 node tests/antigravity-chain-entries-check.mjs`: a-e fail
+(d shows the live "2 invalid | 2/4 usable now"); f, the module's own cases, passes. On the first
+commit only e (the status marks) fails.
 **Compat/undo:** no config. Needs a pi whose `ctx.modelRegistry` has `getAll()` (1.0.1 does); without
 it the old built-in-only list and one warning. Revert this commit, reinstall with `pi update
 --extension git:github.com/shine2lay/pi-multi-pass@mine` and load it with `pi-web-deploy restart`.

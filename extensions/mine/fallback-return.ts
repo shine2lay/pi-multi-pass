@@ -66,16 +66,37 @@ export function refusalReturns(config: ReturnConfig, name: string): boolean {
 	return pool.returnOnRefusal ?? (isFallbackPool(config, name) || Boolean(primaryTarget(config, name)));
 }
 
-/** One /pool status line: the order a limit refusal on this pool tries, top of the list first. */
-export function loopBackLine(config: ReturnConfig, poolName: string): string | undefined {
+/** One /pool status line: the order a limit refusal on this pool tries, top of the list first.
+ * entryIssue (multi-sub's getChainEntryIssue): why the rotation skips an entry, or null. Every skipped
+ * entry is marked in the line, so a chain whose entries the rotation can't use never reads healthy
+ * (mine/antigravity-chain-entries: the Antigravity entries were skipped while this line listed them). */
+export function loopBackLine(
+	config: ReturnConfig,
+	poolName: string,
+	entryIssue?: (entry: ReturnChainEntry) => string | null | undefined,
+): string | undefined {
 	if (!enabledPool(config, poolName)) return undefined;
 	const chain = config.chains.find((c) => c.enabled && entriesOf(c).some((entry) => entry.pool === poolName));
 	if (!chain) return undefined;
-	const order = entriesOf(chain).map((entry) => entry.pool).filter((pool, i, all) => all.indexOf(pool) === i).join(" -> ");
-	const first = entriesOf(chain)[0]?.pool === poolName;
-	return first || refusalReturns(config, poolName)
+	const entries = entriesOf(chain);
+	const skipped = entries.flatMap((entry) => {
+		const issue = entryIssue?.(entry);
+		return issue ? [{ entry, issue }] : [];
+	});
+	const pools = entries.map((entry) => entry.pool).filter((pool, i, all) => all.indexOf(pool) === i);
+	const order = pools.map((pool) => {
+		const count = entries.filter((entry) => entry.pool === pool).length;
+		const invalid = skipped.filter(({ entry }) => entry.pool === pool).length;
+		if (invalid === 0) return pool;
+		return invalid === count ? `${pool} (invalid, skipped)` : `${pool} (${invalid} of ${count} entries invalid)`;
+	}).join(" -> ");
+	const skips = skipped.length
+		? `; skips invalid entries: ${skipped.map(({ entry, issue }) => `${entry.pool} -> ${entry.model} (${issue})`).join(", ")}`
+		: "";
+	const first = entries[0]?.pool === poolName;
+	return (first || refusalReturns(config, poolName)
 		? `loop: a limit refusal goes to the first account with room in ${order}, wrapping to the top; each account once per turn; never at a send`
-		: `loop: off for this pool (returnOnRefusal: false); a limit refusal only moves on down ${order}`;
+		: `loop: off for this pool (returnOnRefusal: false); a limit refusal only moves on down ${order}`) + skips;
 }
 
 /** The pool a provider is in (last match, as the rest of multi-sub resolves it). */

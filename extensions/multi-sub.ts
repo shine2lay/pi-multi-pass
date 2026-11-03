@@ -5034,7 +5034,9 @@ function formatPoolStatusLines(
 	try { // mine/fallback-return
 		const role = fallbackRoleLine(loadGlobalConfig(), pool.name);
 		if (role) lines.push(role);
-		const loop = loopBackLine(loadGlobalConfig(), pool.name); // mine/loop-back
+		// mine/loop-back; mine/antigravity-chain-entries: entries the rotation skips are marked in the line
+		const config = loadGlobalConfig();
+		const loop = loopBackLine(config, pool.name, (entry) => getChainEntryIssue(entry as ChainEntryConfig, config));
 		if (loop) lines.push(loop);
 	} catch { /* status only */ }
 	if (pool.selectorScript) {
