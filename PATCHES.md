@@ -317,6 +317,20 @@ left panel (a Limits box under History, with a refresh button).
   { minOAuthValidityMs: 365d })` and retries once before reporting `sign-in-expired`. Tokens within
   2 minutes of expiry count as expired, so no checker ever refreshes on its own. Nothing writes
   auth.json; no token is logged or stored.
+- **Sign in with ChatGPT** (`openai` OAuth, Ops #756): pi SDK 1.0.1 calls the Codex sign-in "OpenAI
+  Codex (legacy)"; the owner signs in through `openai`. Its row is named `ChatGPT`; the Codex one
+  `ChatGPT (legacy)`, listed only while it holds a sign-in (or is a configured sub), never kept from
+  old rows. An `openai` API key alone is not listed. Hypothesis (rule 20): the `openai` token works on
+  `/wham/usage` like Codex's. MISS, probed 2026-11-02 with the stored token (no model call, no token
+  printed; scope `chatgpt.tokens.use.direct`, aud `api.openai.com/v1`): `chatgpt.com/backend-api/
+  wham/usage` 401 `no_matching_rule`, `.../codex/usage` 403, `api.openai.com/v1/me` 401,
+  `/v1/organization/usage/completions` 401, `/v1/models` 200 with no usage headers; pi-ai only links
+  chatgpt.com/settings/usage on `subscription_sharing_usage_limit_exceeded`, and OpenAI's docs
+  publish no usage endpoint or headers for this sign-in. So the row asks nothing and carries a
+  `note` (plain words, not a failure: `NO_USAGE_NOTES`); a reply whose error matches
+  `subscription_sharing_*usage_limit_exceeded` marks it `limited` with `limitedAt`, the next good
+  reply clears it (`recordReplyLimited`, from a `turn_end` hook); a check keeps the file's mark.
+  Undo: drop `"openai"` from `limitsHost().bases` (the row goes; the mark hook then never matches).
 - **Stored entry kinds** (`credentialFailure`): `oauth` is checked; only `api_key` says "signed in
   with an API key"; any other entry (no type, unknown type, or malformed like the `{result,next}`
   left in auth.json on 2026-11-02, which made Claude 1-3 look like API keys) says "signed out (saved

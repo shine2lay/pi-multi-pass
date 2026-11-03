@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runInNewContext } from "node:vm";
 import {
-	ANTHROPIC_PROFILE_URL, ANTHROPIC_USAGE_URL, LIMITS_CHANNEL_KEY, REASON_TEXT,
+	ANTHROPIC_PROFILE_URL, ANTHROPIC_USAGE_URL, LIMITS_CHANNEL_KEY, NO_USAGE_NOTES, REASON_TEXT,
 	baseOf, checkAccount, checkAllLimits, formatAccountLine, formatAgo, formatLimitWindow, formatLimitsText,
-	installLimitsApi, limitsChannel, limitsCheckSummary, limitsChecking, listAccounts,
-	parseAnthropicProfile, parseAnthropicUsage, planName, readLimitsReadings, recordReplyLimits,
+	hasNoUsageNumbers, installLimitsApi, isUsageLimitReply, limitsChannel, limitsCheckSummary, limitsChecking, listAccounts,
+	parseAnthropicProfile, parseAnthropicUsage, planName, readLimitsReadings, recordReplyLimited, recordReplyLimits,
 	registerLimitsHost, reliableFetch, retryAfterMs, sanitizeReadings, windowsFromChecker,
 	windowsFromCodexUsage, windowsFromQuotaHeaders, writeLimitsReadings,
 } from "../extensions/mine/subs-limits.ts";
@@ -22,7 +22,7 @@ const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 const NOW = Date.parse("2026-10-02T06:00:00Z");
 const sec = (iso) => Math.floor(Date.parse(iso) / 1000);
 const STATE_KEY = Symbol.for("pi-multi-pass.limits.state.v1");
-const BASES = ["anthropic", "openai-codex", "github-copilot", "google-gemini-cli", "google-antigravity", "minimax", "minimax-cn"];
+const BASES = ["anthropic", "openai-codex", "github-copilot", "google-gemini-cli", "google-antigravity", "minimax", "minimax-cn", "openai"];
 const WHAM = "https://chatgpt.test/backend-api/wham/usage";
 
 const root = mkdtempSync(join(tmpdir(), "subs-limits-check-"));
@@ -231,11 +231,12 @@ assert.equal(retryAfterMs(null), undefined);
 /* --- every account gets a row --- */
 {
 	const host = makeHost({
-		creds: { anthropic: oauth("a"), "anthropic-2": oauth("b"), "openai-codex": oauth("c"), minimax: { type: "api_key", key: "k" } },
+		creds: { anthropic: oauth("a"), "anthropic-2": oauth("b"), "openai-codex": oauth("c"), "openai-codex-2": oauth("c2"), minimax: { type: "api_key", key: "k" } },
 		configured: [{ provider: "anthropic-2", label: "two@example.com" }, { provider: "anthropic-3", label: "three@example.com" }],
 	});
 	const previous = { version: 1, updatedAt: NOW, accounts: [
 		{ provider: "openai-codex-2", base: "openai-codex", number: 2, name: "ChatGPT 2", windows: [], checkedAt: NOW - 2 * DAY },
+		{ provider: "github-copilot-2", base: "github-copilot", number: 2, name: "Copilot 2", windows: [], checkedAt: NOW - 2 * DAY },
 		{ provider: "anthropic-9", base: "anthropic", number: 9, name: "Claude 9", windows: [], checkedAt: NOW - 60 * DAY },
 		{ provider: "mystery", base: "mystery", number: 1, name: "Mystery 1", windows: [], checkedAt: NOW },
 	] };
@@ -243,8 +244,9 @@ assert.equal(retryAfterMs(null), undefined);
 		["anthropic", "Claude 1", undefined],
 		["anthropic-2", "Claude 2", "two@example.com"],
 		["anthropic-3", "Claude 3", "three@example.com"],
-		["openai-codex", "ChatGPT 1", undefined],
-		["openai-codex-2", "ChatGPT 2", undefined],
+		["openai-codex", "ChatGPT (legacy)", undefined],
+		["openai-codex-2", "ChatGPT (legacy) 2", undefined],
+		["github-copilot-2", "Copilot 2", undefined],
 	], "signed-in bases (ChatGPT too, though not a numbered sub), configured slots even signed out, recent rows kept; an API key alone is no subscription");
 }
 
@@ -293,7 +295,7 @@ assert.equal(retryAfterMs(null), undefined);
 		["anthropic-2", "Claude 2", undefined],
 		["anthropic-3", "Claude 3", "busy"],
 		["anthropic-4", "Claude 4", "signed-out"],
-		["openai-codex", "ChatGPT 1", undefined],
+		["openai-codex", "ChatGPT (legacy)", undefined],
 		["github-copilot", "Copilot 1", "unsupported"],
 		["minimax-2", "MiniMax 2", "not-subscription"],
 	], "every account has a row, none dropped");
@@ -361,7 +363,7 @@ assert.equal(retryAfterMs(null), undefined);
 	const asChat = formatLimitsText(r2, { now: clock, current: "openai-codex" });
 	assert.match(asTwo, /^Limits · 7 account\(s\) · checked just now\n/);
 	assert.match(asTwo, /\n {2}Claude 2 · Pro · two@example\.com \(this chat\) — sign-in expired/);
-	assert.match(asChat, /\n {2}ChatGPT 1 · Plus · chat@example\.com \(this chat\) — no answer/);
+	assert.match(asChat, /\n {2}ChatGPT \(legacy\) · Plus · chat@example\.com \(this chat\) — no answer/);
 	assert.equal(asTwo.replace(" (this chat)", ""), asChat.replace(" (this chat)", ""));
 	assert.equal(checkAllLimits.length, 2, "the check takes a host and options: no model");
 }
@@ -567,7 +569,7 @@ assert.equal(retryAfterMs(null), undefined);
 	const out = await checkAccount(freeHost, slot, undefined, opts(newFile(), makeFetch(() => json(free))));
 	assert.equal(out.failure, undefined, "a Free plan's row has numbers, not 'no usage numbers in the reply'");
 	assert.deepEqual([out.plan, out.windows.map((w) => [w.key, w.usedPercent])], ["Free", [["30d", 10]]]);
-	assert.match(formatAccountLine(out, NOW), /^ChatGPT 1 · Free — 30-day 10% used, resets in 15d \d+h · checked /);
+	assert.match(formatAccountLine(out, NOW), /^ChatGPT \(legacy\) · Free — 30-day 10% used, resets in 15d \d+h · checked /);
 
 	// An "error" verdict with nothing read is still a failure, and keeps the last numbers.
 	const blank = makeHost({
@@ -580,6 +582,80 @@ assert.equal(retryAfterMs(null), undefined);
 	const failed = await checkAccount(blank, slot, out, opts(newFile(), makeFetch(() => json({}))));
 	assert.equal(failed.failure.text, "check failed (no usage numbers in the reply)");
 	assert.deepEqual(failed.windows.map((w) => w.key), ["30d"], "the last good numbers stay");
+}
+
+/* --- Sign in with ChatGPT ("openai"): its own row, no usage numbers; the Codex sign-in is legacy (Ops #756) --- */
+{
+	resetShared();
+	clock = NOW;
+	const names = (host, previous) => listAccounts(host, previous, NOW).map((s) => [s.provider, s.name]);
+	assert.deepEqual(names(makeHost({ creds: { openai: oauth("o") } })), [["openai", "ChatGPT"]], "the ChatGPT sign-in alone gets a row");
+	assert.deepEqual(names(makeHost({ creds: { "openai-codex": oauth("c") } })), [["openai-codex", "ChatGPT (legacy)"]]);
+	assert.deepEqual(names(makeHost({ creds: { "openai-codex": oauth("c"), openai: oauth("o"), anthropic: oauth("a") } })),
+		[["anthropic", "Claude 1"], ["openai", "ChatGPT"], ["openai-codex", "ChatGPT (legacy)"]], "both, the current sign-in first");
+	assert.deepEqual(names(makeHost({ creds: { openai: { type: "api_key", key: "sk-x" } } })), [], "an OpenAI API key is no subscription: not listed");
+	const seen = { version: 1, updatedAt: NOW, accounts: [
+		{ provider: "openai-codex", base: "openai-codex", number: 1, name: "ChatGPT 1", windows: [], checkedAt: NOW - HOUR },
+		{ provider: "openai", base: "openai", number: 1, name: "ChatGPT", windows: [], triedAt: NOW - HOUR },
+	] };
+	assert.deepEqual(names(makeHost({}), seen), [["openai", "ChatGPT"]], "the legacy row shows only while it holds a sign-in");
+	assert.deepEqual(names(makeHost({ configured: [{ provider: "openai-codex-2" }] })), [["openai-codex-2", "ChatGPT (legacy) 2"]], "a configured sub stays");
+
+	// The check: nothing is asked for the ChatGPT sign-in, and no numbers is a note, not a failure.
+	const file = newFile();
+	const refreshes = [];
+	const wham = makeFetch((c) => {
+		if (c.url === WHAM) return json({ five: 10, week: 25 });
+		throw new Error(`unexpected call ${c.url}`);
+	});
+	const host = makeHost({
+		creds: { openai: oauth("tok-o"), "openai-codex": oauth("tok-c") }, checkOther: codexLike,
+		refresh: async (p, force) => { refreshes.push([p, force]); },
+	});
+	const r = await checkAllLimits(host, opts(file, wham));
+	const o = r.accounts.find((a) => a.provider === "openai");
+	assert.deepEqual([o.name, o.failure, o.note, o.windows, o.checkedAt, o.limited], ["ChatGPT", undefined, NO_USAGE_NOTES.openai, [], undefined, undefined]);
+	assert.equal(wham.calls.filter((c) => c.auth === "Bearer tok-o").length, 0, "no request with the ChatGPT sign-in");
+	assert.deepEqual(refreshes.filter(([p]) => p === "openai"), [["openai", undefined]], "pi's own refresh only; never a forced one");
+	assert.equal(limitsCheckSummary(r).failed, 0, "no numbers is not a failed check");
+	assert.equal(formatAccountLine(o, NOW), `ChatGPT — ${NO_USAGE_NOTES.openai}`);
+	const legacy = r.accounts.find((a) => a.provider === "openai-codex");
+	assert.deepEqual([legacy.name, legacy.windows.map((w) => w.usedPercent), legacy.note], ["ChatGPT (legacy)", [10, 25], undefined]);
+	assert.equal(readLimitsReadings(file).accounts.find((a) => a.provider === "openai").note, NO_USAGE_NOTES.openai, "the note survives the file");
+	const expired = await checkAccount(makeHost({ creds: { openai: oauth("tok-o", NOW - MIN) } }), { provider: "openai", base: "openai", number: 1, name: "ChatGPT" }, undefined, opts(newFile(), wham));
+	assert.deepEqual([expired.failure?.reason, expired.note], ["sign-in-expired", undefined], "a dead sign-in still says so");
+
+	// The LIMITED mark: a reply's usage-limit error sets it, the next good reply clears it.
+	assert.equal(isUsageLimitReply('OpenAI API error: 429 {"error":{"code":"subscription_sharing_usage_limit_exceeded"}}'), true);
+	assert.equal(isUsageLimitReply("subscription_sharing_workplace_individual_usage_limit_exceeded"), true);
+	assert.equal(isUsageLimitReply("429 Too Many Requests: rate limit"), false);
+	assert.deepEqual([hasNoUsageNumbers("openai"), hasNoUsageNumbers("openai-2"), hasNoUsageNumbers("openai-codex"), hasNoUsageNumbers("anthropic")], [true, true, false, false]);
+	const events = [];
+	limitsChannel().listeners.add((e) => events.push(e));
+	assert.equal(recordReplyLimited(file, "openai", true, NOW + MIN), true);
+	let row = readLimitsReadings(file).accounts.find((a) => a.provider === "openai");
+	assert.deepEqual([row.limited, row.limitedAt, row.failure, row.note], [true, NOW + MIN, undefined, NO_USAGE_NOTES.openai]);
+	assert.equal(events.length, 1, "the mark is announced");
+	assert.equal(formatAccountLine(row, NOW + 3 * MIN), `ChatGPT — ${NO_USAGE_NOTES.openai} · LIMITED (seen 2 min ago)`);
+	assert.equal(recordReplyLimited(file, "openai", true, NOW + 2 * MIN), false, "already marked: no rewrite");
+	clock = NOW + 5 * MIN;
+	row = (await checkAllLimits(host, opts(file, wham))).accounts.find((a) => a.provider === "openai");
+	assert.deepEqual([row.limited, row.limitedAt], [true, NOW + MIN], "a check keeps the mark: it can't measure it");
+	assert.equal(recordReplyLimited(file, "openai", false, NOW + 6 * MIN), true, "a good reply clears it");
+	row = readLimitsReadings(file).accounts.find((a) => a.provider === "openai");
+	assert.deepEqual([row.limited, row.limitedAt], [undefined, undefined]);
+	assert.equal(recordReplyLimited(file, "openai", false, NOW + 7 * MIN), false, "nothing to clear: no rewrite");
+	assert.equal(recordReplyLimited(file, "openai-codex", true, NOW), false, "rows with numbers never take a reply mark");
+	assert.equal(recordReplyLimited(newFile(), "openai", true, NOW), false, "no row, no write");
+	// A mark set while a check runs is kept.
+	resetShared();
+	clock = NOW + 8 * MIN;
+	const racing = makeFetch((c) => {
+		if (c.url === WHAM) { recordReplyLimited(file, "openai", true, NOW + 8 * MIN + 1); return json({ five: 11, week: 26 }); }
+		throw new Error(`unexpected call ${c.url}`);
+	});
+	row = (await checkAllLimits(host, opts(file, racing))).accounts.find((a) => a.provider === "openai");
+	assert.deepEqual([row.limited, row.limitedAt], [true, NOW + 8 * MIN + 1]);
 }
 
 /* --- concurrent checks join; the shared channel --- */
@@ -782,6 +858,10 @@ assert.equal(retryAfterMs(null), undefined);
 		["runtime.getAuth", "broken", 365 * 24 * 3600 * 1000],
 		["getProviderAuth", "openai-codex"],
 	]);
+	assert.match(hostFn, /bases: \(\) => \[\.\.\.Object\.keys\(PROVIDER_TEMPLATES\), "antigravity", "openai"\]/, "Sign in with ChatGPT is a Limits row");
+	assert.doesNotMatch(src.slice(src.indexOf("const PROVIDER_TEMPLATES"), src.indexOf('"github-copilot": {')), /\bopenai: \{/, "routing unchanged: no openai sub template");
+	assert.match(src, /pi\.on\("turn_end", \(event\) => \{[\s\S]{0,250}hasNoUsageNumbers\(message\.provider\)[\s\S]{0,250}isUsageLimitReply\(message\.errorMessage[\s\S]{0,250}recordReplyLimited\(limitsFile\(\), message\.provider, limited\)/,
+		"replies on Sign in with ChatGPT set and clear its LIMITED mark");
 	assert.match(src, /"multi-pass-limits"/, "the footer's current-account box stays");
 	assert.equal((mod.match(/writeFileSync\(/g) ?? []).length, 1, "the readings file is the only thing written");
 	assert.doesNotMatch(mod, /console\.|auth\.json"/, "no logging (no token can leak), no auth.json path");

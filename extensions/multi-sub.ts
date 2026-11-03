@@ -103,9 +103,12 @@ import {
 	LIMITS_FILE_NAME,
 	checkAllLimits,
 	formatLimitsText,
+	hasNoUsageNumbers,
 	installLimitsApi,
+	isUsageLimitReply,
 	limitsCheckSummary,
 	readLimitsReadings,
+	recordReplyLimited,
 	recordReplyLimits,
 	registerLimitsHost,
 	windowsFromChecker,
@@ -1431,7 +1434,8 @@ function limitsHost(registry: () => ExtensionContext["modelRegistry"] | undefine
 	return {
 		configured: () => normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()))
 			.map((entry) => ({ provider: subProviderName(entry), label: entry.label })),
-		bases: () => [...Object.keys(PROVIDER_TEMPLATES), "antigravity"],
+		// "openai" = Sign in with ChatGPT: a Limits row only (not a numbered-sub template; routing unchanged).
+		bases: () => [...Object.keys(PROVIDER_TEMPLATES), "antigravity", "openai"],
 		stored: (provider) => readStoredCredential(provider) as LimitsCredential | undefined,
 		refresh: async (provider, force) => {
 			const reg = registry();
@@ -6432,6 +6436,16 @@ export default function multiSub(pi: ExtensionAPI) {
 	});
 	pi.on("agent_before_settle", async (event, ctx) =>
 		poolManager.signInContinuation.settle(event, ctx.model, Boolean(ctx.signal?.aborted)));
+
+	// mine/subs-limits: Sign in with ChatGPT has no usage numbers; a reply's usage-limit error marks
+	// its Limits row LIMITED, the next good reply clears it (free: no request of its own).
+	pi.on("turn_end", (event) => {
+		const message = event.message as { role: string; provider?: string; stopReason?: string; errorMessage?: string };
+		if (message.role !== "assistant" || !message.provider || !hasNoUsageNumbers(message.provider)) return;
+		const limited = message.stopReason === "error" && isUsageLimitReply(message.errorMessage ?? "");
+		if (!limited && (message.stopReason === "error" || message.stopReason === "aborted")) return;
+		try { recordReplyLimited(limitsFile(), message.provider, limited); } catch { /* side update */ }
+	});
 
 	// Listen for errors to trigger pool rotation
 	pi.on("agent_end", async (event: AgentEndEvent, ctx: ExtensionContext) => {

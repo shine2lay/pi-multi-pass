@@ -154,7 +154,8 @@ try {
 	// One narrow cache-row removal, then repeated real checks. Other rows persist.
 	const file = path.join(dir, "subs-limits.json"), now = Date.now();
 	const stale = { provider: "anthropic-5", base: "anthropic", number: 5, name: "Claude 5", windows: [], triedAt: now };
-	const retained = { ...stale, provider: "openai-codex", base: "openai-codex", name: "ChatGPT 1", number: 1 };
+	// Not openai-codex: a legacy row is listed only while it holds a sign-in (Ops #756).
+	const retained = { ...stale, provider: "github-copilot", base: "github-copilot", name: "Copilot 1", number: 1 };
 	let previous = { version: 1, updatedAt: now, accounts: [stale, retained] };
 	assert.ok(subs.listAccounts(host, previous).some(r => r.provider === "anthropic-5"), "original prior-cache retention is sole cause");
 	previous.accounts = previous.accounts.filter(r => r.provider !== "anthropic-5");
@@ -167,7 +168,7 @@ try {
 			throw new Error("network forbidden; legacy fake intentionally fails closed");
 		} });
 		assert.ok(!readings.accounts.some(r => r.provider === "anthropic-5"), "fresh normal refresh cannot resurrect removed stale row");
-		assert.ok(readings.accounts.some(r => r.provider === "openai-codex"), "other previous rows retained");
+		assert.ok(readings.accounts.some(r => r.provider === "github-copilot"), "other previous rows retained");
 		assert.equal(readings.accounts.filter(r => r.provider === "antigravity").length, 1);
 		assert.ok(readings.accounts.find(r => r.provider === "antigravity").checkedAt);
 	}

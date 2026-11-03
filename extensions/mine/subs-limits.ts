@@ -4,8 +4,11 @@
  *
  *   · Claude accounts: Anthropic's free usage page (`GET /api/oauth/usage`, the page
  *     Claude Code's /usage reads). Nothing is sent to a model; nothing is spent.
- *   · Other providers: the existing quota checker (ChatGPT: `/wham/usage`), handed the
- *     same reliable fetch.
+ *   · Other providers: the existing quota checker (ChatGPT's Codex sign-in: `/wham/usage`),
+ *     handed the same reliable fetch.
+ *   · Sign in with ChatGPT (`openai` OAuth): OpenAI has no usage page for it, so its row says so
+ *     in plain words (a note, not a failure) and asks nothing; a reply's usage-limit error marks
+ *     it LIMITED until the next good reply. The Codex sign-in is the legacy row.
  *   · Every account gets a row on every check. A failed check keeps the account's last
  *     good numbers, with their age and the reason in plain words.
  *   · The numbers never depend on which model a chat uses: the check takes no model.
@@ -96,6 +99,10 @@ export interface LimitsAccount {
 	failure?: LimitsFailure;
 	/** ms: when plan/email were last read from the provider. */
 	profileAt?: number;
+	/** Plain words for an account whose provider gives no usage numbers (not a failure). */
+	note?: string;
+	/** ms: when a reply's usage-limit error set `limited` on an account without usage numbers. */
+	limitedAt?: number;
 }
 
 export interface LimitsReadings {
@@ -126,7 +133,8 @@ const REPLY_WRITE_INTERVAL_MS = MINUTE;
 
 const SHORT_NAMES: Record<string, string> = {
 	anthropic: "Claude",
-	"openai-codex": "ChatGPT",
+	openai: "ChatGPT",
+	"openai-codex": "ChatGPT (legacy)",
 	"github-copilot": "Copilot",
 	"google-gemini-cli": "Gemini",
 	"google-antigravity": "Antigravity",
@@ -135,6 +143,34 @@ const SHORT_NAMES: Record<string, string> = {
 	"minimax-cn": "MiniMax CN",
 };
 const BASE_ORDER = Object.keys(SHORT_NAMES);
+/** One sign-in each: the first is named without a number (`ChatGPT`, not `ChatGPT 1`). */
+const UNNUMBERED_FIRST: ReadonlySet<string> = new Set(["openai", "openai-codex"]);
+/** Superseded sign-ins: listed only while they hold one (or are configured), never kept from old rows. */
+const LEGACY_BASES: ReadonlySet<string> = new Set(["openai-codex"]);
+
+/**
+ * Providers with no usage source that works without a model call. `openai` (Sign in with
+ * ChatGPT, scope `chatgpt.tokens.use.direct`): `/wham/usage` and `/codex/usage` refuse its token
+ * (401/403), `/v1/models` answers without usage headers, and OpenAI's docs name none (Ops #756).
+ */
+export const NO_USAGE_NOTES: Readonly<Record<string, string>> = {
+	openai: "OpenAI gives no usage numbers for Sign in with ChatGPT; see chatgpt.com/settings/usage",
+};
+
+/** The account's provider gives no usage numbers (`openai`, `openai-2`, …). */
+export function hasNoUsageNumbers(provider: string): boolean {
+	return baseOf(provider, Object.keys(NO_USAGE_NOTES)) !== undefined;
+}
+
+/** A reply error that says the ChatGPT plan's shared usage limit is reached. */
+export function isUsageLimitReply(errorMessage: string): boolean {
+	return /subscription_sharing_[a-z_]*usage_limit_exceeded/.test(errorMessage);
+}
+
+function slotName(base: string, number: number): string {
+	const short = SHORT_NAMES[base] ?? base;
+	return number === 1 && UNNUMBERED_FIRST.has(base) ? short : `${short} ${number}`;
+}
 
 // ==========================================================================
 // Small helpers
@@ -521,14 +557,17 @@ export function listAccounts(host: LimitsHost, previous: LimitsReadings | undefi
 			return;
 		}
 		const number = numberOf(provider, base);
-		slots.set(provider, { provider, base, number, name: `${SHORT_NAMES[base] ?? base} ${number}`, label });
+		slots.set(provider, { provider, base, number, name: slotName(base, number), label });
 	};
 	for (const base of bases) {
 		if (host.stored(base)?.type === "oauth") add(base);
 	}
 	for (const entry of host.configured()) add(entry.provider, text(entry.label, 120));
 	for (const row of previous?.accounts ?? []) {
-		if (!slots.has(row.provider) && (row.checkedAt ?? row.triedAt ?? 0) > now - KEEP_UNLISTED_MS) add(row.provider, row.label);
+		if (slots.has(row.provider) || (row.checkedAt ?? row.triedAt ?? 0) <= now - KEEP_UNLISTED_MS) continue;
+		const base = baseOf(row.provider, bases);
+		if (base && LEGACY_BASES.has(base) && host.stored(row.provider)?.type !== "oauth") continue;
+		add(row.provider, row.label);
 	}
 	const rank = (base: string) => {
 		const index = BASE_ORDER.indexOf(base);
@@ -587,7 +626,7 @@ export async function checkAccount(
 		provider: slot.provider, base: slot.base, number: slot.number, name: slot.name,
 		label: slot.label,
 		email: previous?.email, plan: previous?.plan, profileAt: previous?.profileAt,
-		windows: previous?.windows ?? [], limited: previous?.limited,
+		windows: previous?.windows ?? [], limited: previous?.limited, limitedAt: previous?.limitedAt,
 		checkedAt: previous?.checkedAt, source: previous?.source,
 		triedAt: o.now(),
 	};
@@ -611,6 +650,9 @@ export async function checkAccount(
 			const access = typeof credential.access === "string" ? credential.access : "";
 			const expires = finite(credential.expires) ? credential.expires : undefined;
 			if (!access || (expires !== undefined && expires <= o.now() + EXPIRY_MARGIN_MS)) return fail("sign-in-expired");
+			// No usage source: say so, ask nothing. The LIMITED mark comes from replies only.
+			const note = NO_USAGE_NOTES[slot.base];
+			if (note) return { ...row, note, failure: undefined };
 
 			const log: FetchLog = { attempts: 0 };
 			const fetchReliably = reliableFetch(o.fetch, log, o);
@@ -720,6 +762,8 @@ function sanitizeAccount(value: unknown): LimitsAccount | undefined {
 			? { reason, text: text(f.text, 200) ?? REASON_TEXT[reason], at: finite(f.at) ? f.at : 0 }
 			: undefined,
 		profileAt: finite(a.profileAt) ? a.profileAt : undefined,
+		note: text(a.note, 200),
+		limitedAt: finite(a.limitedAt) ? a.limitedAt : undefined,
 	};
 }
 
@@ -859,6 +903,8 @@ export function checkAllLimits(host: LimitsHost, options: CheckOptions): Promise
 		const current = readLimitsReadings(o.file);
 		const accounts = rows.map((row) => {
 			const fresher = current?.accounts.find((a) => a.provider === row.provider);
+			// The check never reads a LIMITED mark it can't measure: a reply's mark is the file's.
+			if (row.note && fresher) return { ...row, limited: fresher.limited, limitedAt: fresher.limitedAt };
 			return fresher?.checkedAt !== undefined && (row.checkedAt === undefined || fresher.checkedAt > row.checkedAt)
 				? { ...row, windows: fresher.windows, limited: fresher.limited, checkedAt: fresher.checkedAt, source: fresher.source }
 				: row;
@@ -908,6 +954,23 @@ export function recordReplyLimits(file: string, provider: string, windows: Limit
 		windows: merged, limited: merged.some((w) => w.limited) || undefined,
 		checkedAt: now, source: "reply", failure: undefined,
 	});
+	readings.updatedAt = now;
+	writeLimitsReadings(file, readings);
+	emit({ checking: limitsChecking(), readings });
+	return true;
+}
+
+/**
+ * A reply on an account without usage numbers (Sign in with ChatGPT): its usage-limit error
+ * (`limited` true) marks the row LIMITED with the time; the next good reply (`limited` false)
+ * clears it. Only rows a check created, and only on a change, are written.
+ */
+export function recordReplyLimited(file: string, provider: string, limited: boolean, now = Date.now()): boolean {
+	if (!hasNoUsageNumbers(provider)) return false;
+	const readings = readLimitsReadings(file);
+	const row = readings?.accounts.find((a) => a.provider === provider);
+	if (!readings || !row || Boolean(row.limited) === limited) return false;
+	Object.assign(row, { limited: limited || undefined, limitedAt: limited ? now : undefined });
 	readings.updatedAt = now;
 	writeLimitsReadings(file, readings);
 	emit({ checking: limitsChecking(), readings });
@@ -973,9 +1036,9 @@ export function formatAccountLine(a: LimitsAccount, now = Date.now(), current = 
 		parts.push(a.failure.text);
 		if (windows) parts.push(`last numbers ${formatAgo(a.checkedAt, now) ?? "earlier"}: ${windows}`);
 	} else {
-		parts.push(windows || "no numbers yet");
+		parts.push(windows || a.note || "no numbers yet");
 	}
-	if (a.limited) parts.push("LIMITED");
+	if (a.limited) parts.push(a.limitedAt !== undefined ? `LIMITED (seen ${formatAgo(a.limitedAt, now)})` : "LIMITED");
 	if (!a.failure && a.checkedAt !== undefined) parts.push(`checked ${formatAgo(a.checkedAt, now)}`);
 	return `${who} — ${parts.join(" · ")}`;
 }
