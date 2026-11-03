@@ -24,6 +24,7 @@ import * as countdown from "../extensions/mine/reset-countdown.ts";
 import * as subsLimits from "../extensions/mine/subs-limits.ts";
 import * as envAllowed from "../extensions/mine/env-allowed-subs.ts";
 import * as fallbackReturn from "../extensions/mine/fallback-return.ts";
+import * as poolModels from "../extensions/mine/pool-models.ts";
 import { isRetryableAssistantError } from "./support/pi-retry-classifier.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -149,7 +150,7 @@ try {
 				.replace("export default function multiSub", "function multiSub");
 			const production = runInNewContext(`${executable}\n;({multiSub, formatPoolStatusLines});`, {
 				...fs, ...path, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
-				...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...envAllowed, ...fallbackReturn, isRetryableAssistantError,
+				...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...envAllowed, ...fallbackReturn, ...poolModels, isRetryableAssistantError,
 				Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
 				readStoredCredential: (provider) => creds[provider],
 				builtinProviders: () => [], getModels: () => [model],
@@ -228,7 +229,7 @@ try {
 				.replace("export default function multiSub", "function multiSub");
 			const { formatPoolStatusLines } = runInNewContext(`${executable}\n;({formatPoolStatusLines});`, {
 				...fs, ...path, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
-				...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...envAllowed, ...fallbackReturn, Type: {}, getAgentDir: () => temp,
+				...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...envAllowed, ...fallbackReturn, ...poolModels, Type: {}, getAgentDir: () => temp,
 				readStoredCredential: () => undefined, builtinProviders: () => [], getModels: () => [model],
 				process: { env: {}, pid: process.pid }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,
 			});

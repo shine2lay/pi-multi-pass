@@ -75,6 +75,8 @@ import {
 } from "@earendil-works/pi-tui";
 // mine/fallback-return: chats on the fallback pool go back to the primary pool (PATCHES.md)
 import { fallbackRoleLine, loopBackLine, refusalReturns, ReturnContinuation, ReturnGuard, returnCandidates } from "./mine/fallback-return.ts";
+// mine/antigravity-chain-entries: a pool's models include those pi's registry holds (PATCHES.md)
+import { PoolModelCatalog, type RegisteredModelSource } from "./mine/pool-models.ts";
 // mine/model-fallback: model-scoped exhaustion for same-pool chain entries (PATCHES.md)
 import {
 	findApplicableChainForModel,
@@ -4577,8 +4579,16 @@ async function createAndPersistPool(
 	return pool;
 }
 
+// mine/antigravity-chain-entries: pi-ai's built-in models for the base provider, plus the models pi's live
+// registry holds for it or a member (pi-antigravity registers "antigravity" only there). The registry is the
+// chat's, set at session_start and read at every call.
+const poolModels = new PoolModelCatalog(
+	(provider) => (getModels(provider as any) as Model<Api>[]).map((model) => model.id),
+	(message) => console.warn(message),
+);
+
 function getSelectableModelsForPool(pool: PoolConfig): string[] {
-	return (getModels(pool.baseProvider as any) as Model<Api>[]).map((model) => model.id);
+	return poolModels.modelIds(pool);
 }
 
 function createChainValidationError(
@@ -6316,6 +6326,7 @@ export default function multiSub(pi: ExtensionAPI) {
 
 	// On session start, reload pools with project-level config
 	pi.on("session_start", async (_event, ctx) => {
+		poolModels.useRegistry(() => ctx.modelRegistry as unknown as RegisteredModelSource); // mine/antigravity-chain-entries
 		refusalFallback.reset();
 		const effective = loadEffectiveConfig(ctx.cwd);
 		poolManager.loadPools(effective.pools);

@@ -41,9 +41,10 @@ const config = (live) => ({
 	refusalFallback: { enabled: true, provider: "openai-codex", model: SOL },
 });
 
-/** The shared chain harness (support/chain-world.mjs) on this fixture: live = the stopgap returnOnRefusal config. */
+/** The shared chain harness (support/chain-world.mjs) on this fixture: live = the stopgap returnOnRefusal config.
+ * Models as pi has them: anthropic and openai-codex built in; antigravity only in pi's registry (pi-antigravity). */
 const world = ({ live = false, ...opts }, run) => chainWorld({ sources, config: config(live), quotaMembers: MEMBERS,
-	models: [CLAUDE, SOL, ARGON], ...opts }, run);
+	builtin: { anthropic: [CLAUDE], "openai-codex": [SOL] }, registered: [{ provider: "antigravity", id: ARGON }], ...opts }, run);
 
 /** One GPT-style refusal from `start`; expect the chat on `want` with one continuation. */
 const moves = (opts, error, want) => world(opts, async (c) => {

@@ -3,20 +3,18 @@
 // for pi's own retry, so a turn never both retries and continues.
 // Owner 2026-11-02: "can you fix the fall back loop ? if it need fixing since we change subs".
 // Runs the real multi-sub.ts through the shared chain harness (support/chain-world.mjs) on the live chain
-// shape (claude-real -> chatgpt-fallback -> antigravity-fallback), with pi's own retry classifier from the
-// pi on PATH (support/pi-retry-classifier.mjs). Plain node; no network (fetch throws), fake credentials only,
-// no model calls.
-// CHATGPT_LIMIT_SOURCE_REF=<ref> loads that ref's multi-sub.ts and fallback-return.ts (4dddddd: a and d fail).
+// shape (claude-real -> chatgpt-fallback -> antigravity-fallback, support/live-chain.mjs), with pi's own retry
+// classifier from the pi on PATH (support/pi-retry-classifier.mjs). Plain node; no network (fetch throws),
+// fake credentials only, no model calls.
+// CHATGPT_LIMIT_SOURCE_REF=<ref> loads that ref's multi-sub.ts and fallback-return.ts. 4dddddd: a, c and d fail;
+// 37df0b7: a and c fail (they land on Antigravity, which needs mine/antigravity-chain-entries too).
 import assert from "node:assert/strict";
 import { blockNetwork, chainWorld, continued, loadSources } from "./support/chain-world.mjs";
+import { ARGON_MODEL, CHATGPT_LIMIT, CLAUDE, GPT, LIVE_BUILTIN, LIVE_CONFIG, LIVE_REGISTERED, MEMBERS } from "./support/live-chain.mjs";
 
 const ref = process.env.CHATGPT_LIMIT_SOURCE_REF;
 const sources = await loadSources(ref);
 
-// pi-ai's text for this limit (dist/api/openai-responses.js: formatProviderError + the usage link): status
-// 429, then the SDK error body. Only the body's code is the provider's; message and type are placeholders.
-const CHATGPT_LIMIT = 'OpenAI API error (429): {"message":"...","type":"...","param":null,'
-	+ '"code":"subscription_sharing_usage_limit_exceeded"}\nCheck your ChatGPT usage: https://chatgpt.com/settings/usage';
 // The old Codex sign-in's limit text: no status at all.
 const CODEX_LIMIT = "You have hit your ChatGPT usage limit (plus plan). Try again in ~10 min.";
 const CLAUDE_429 = '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit."}}';
@@ -25,32 +23,8 @@ const CLAUDE_OVERLOADED = '529 {"type":"error","error":{"type":"overloaded_error
 const HARNESS_RETRIED = "429 rate limit";
 const HARNESS_REPLAYED = '400 {"error":{"message":"usage limit reached"}}';
 
-const CLAUDE = "claude-opus-5-5", SOL = "gpt-6.1-sol", ARGON = "gemini-4-argon";
-const MEMBERS = ["anthropic", "anthropic-2", "anthropic-3", "anthropic-4"];
-const GPT = { provider: "openai", id: SOL };
-const ARGON_MODEL = { provider: "antigravity", id: ARGON };
-
-/** ~/.pi/agent/multi-pass.json as live since 2026-11-02 (Codex replaced by Sign in with ChatGPT). */
-const config = {
-	subscriptions: [], presets: [],
-	pools: [
-		{ name: "claude-real", baseProvider: "anthropic", members: MEMBERS, enabled: true,
-			quotaRouting: { policy: "weekly-first", recovery: "off", minWeeklyResetAdvantageMinutes: 0, maxObservationAgeMinutes: 1440 } },
-		{ name: "chatgpt-fallback", baseProvider: "openai", members: ["openai"], enabled: true, returnOnRefusal: true, fallback: false },
-		{ name: "antigravity-fallback", baseProvider: "antigravity", members: ["antigravity"], enabled: true, fallback: false,
-			returnOnRefusal: true },
-	],
-	chains: [
-		{ name: "claude-then-sol", enabled: true, entries: [{ pool: "claude-real", model: CLAUDE, enabled: true },
-			{ pool: "chatgpt-fallback", model: SOL, enabled: true }, { pool: "antigravity-fallback", model: ARGON, enabled: true },
-			{ pool: "antigravity-fallback", model: CLAUDE, enabled: true }] },
-		{ name: "fable-then-opus", enabled: false, entries: [{ pool: "claude-real", model: "claude-fable-5-1", enabled: true },
-			{ pool: "claude-real", model: "claude-opus-5", enabled: true }] },
-	],
-	refusalFallback: { enabled: true, provider: "openai", model: SOL },
-};
-
-const world = (opts, run) => chainWorld({ sources, config, quotaMembers: MEMBERS, models: [CLAUDE, SOL, ARGON], ...opts }, run);
+const world = (opts, run) => chainWorld({ sources, config: LIVE_CONFIG, quotaMembers: MEMBERS, builtin: LIVE_BUILTIN,
+	registered: LIVE_REGISTERED, ...opts }, run);
 
 /** One refusal from `start`; the chat lands on `want`. Returns what the first settle gave, the replays and the chat. */
 const refuse = (opts, error, want) => world(opts, async (c) => {

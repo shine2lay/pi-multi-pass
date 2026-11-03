@@ -8,6 +8,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { runInNewContext } from "node:vm";
 import { execFileSync } from "node:child_process";
 import * as external from "../extensions/mine/antigravity-limits.ts";
+import * as poolModels from "../extensions/mine/pool-models.ts";
 import * as signin from "../extensions/mine/signin-failover.ts";
 import * as refusal from "../extensions/mine/refusal-fallback.ts";
 import * as quotaState from "../extensions/mine/quota-state.ts";
@@ -114,7 +115,7 @@ try {
 			.replace("export default function multiSub", "function multiSub");
 		return runInNewContext(`${executable}\n;({ limitsHost, PROVIDER_TEMPLATES, PROVIDER_QUOTA_CHECKERS, multiSub });`, {
 			...fs, ...path, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
-			...limits, ...reset, ...modelFallback, ...countdown, ...subs, ...envAllowed, ...fallback, ...external,
+			...limits, ...reset, ...modelFallback, ...countdown, ...subs, ...envAllowed, ...fallback, ...external, ...poolModels,
 			Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => dir,
 			readStoredCredential: p => creds[p], builtinProviders: () => [], getModels: () => [],
 			process: { env: {}, pid: process.pid }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,

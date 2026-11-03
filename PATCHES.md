@@ -680,7 +680,43 @@ queued" step tested the old guess. Upstream's `tests/runtime-failover-check.mjs`
 of the old guess; case d checks the real function gives the copy's answers on both texts it uses.
 **Test:** `tests/chatgpt-limit-continue-check.mjs` (a-d, live chain shape; no model calls).
 `CHATGPT_LIMIT_SOURCE_REF=4dddddd node tests/chatgpt-limit-continue-check.mjs` shows the old
-behaviour: a (no continuation after the ChatGPT limit) and d fail; b and c pass.
+behaviour: a and d fail (no continuation after the ChatGPT limit; the old guess), b passes. Since
+antigravity-chain-entries the check sees models as pi has them (Antigravity only in pi's registry),
+so a and c, which land on Antigravity, also fail on any ref before that patch (c fails on 4dddddd too).
 **Compat/undo:** no config. Needs a pi whose pi-ai exports `isRetryableAssistantError` (1.0.1 does);
 the checks fail loudly on one that doesn't. Revert this commit, reinstall with `pi update
+--extension git:github.com/shine2lay/pi-multi-pass@mine` and load it with `pi-web-deploy restart`.
+
+### antigravity-chain-entries  ·  status: local
+**Why:** owner 2026-11-02: "can you fix the fall back loop ? if it need fixing since we change subs"
+(Ops #758). The live `/pool chain list` read "claude-then-sol | 4 entries | enabled | 2 invalid |
+2/4 usable now": both Antigravity entries were "invalid model: no selectable models for antigravity"
+and the rotation skipped them. Upstream lists a pool's models from pi-ai's built-in catalog
+(`getBuiltinModels(baseProvider)`); pi-ai has no "antigravity" provider, pi-antigravity registers it
+through `pi.registerProvider`, which only pi's live model registry holds. So a ChatGPT limit with no
+Claude room ended in "Failover exhausted", and an Argon "Quota reached" (9 chats, 2026-11-02 17:13)
+moved nobody: every move to Antigravity since 10-25 was a hand switch.
+**Behavior:** a pool's selectable models are pi-ai's built-in ones for its base provider, then the
+models pi's registry holds for the base provider or a member, each id once (`PoolModelCatalog`).
+The registry is the chat's (`ctx.modelRegistry`, set at `session_start`) and is read at every call,
+never cached, since an extension may register its provider after multi-pass loads. With no registry,
+built-in models only and one plain warning; models are never guessed, and a model in neither list
+stays invalid. Chain validity, `/pool chain list|status`, chain create and the pool model picker all
+read it, so the Antigravity entries are usable: a ChatGPT limit with no Claude room moves to
+Argon and the turn continues once (chatgpt-limit-continue), an Argon quota moves on to Claude on
+Antigravity. No change to pools, chains, order, `returnOnRefusal` or recovery.
+**Hooks in `extensions/multi-sub.ts`:** the `PoolModelCatalog` import, `poolModels` beside
+`getSelectableModelsForPool` (its body), and one `useRegistry` line at the top of `session_start`.
+**Files:** `extensions/mine/pool-models.ts`; `tests/antigravity-chain-entries-check.mjs`;
+`tests/support/live-chain.mjs` (the live chain, its models and live provider texts; shared with
+`tests/chatgpt-limit-continue-check.mjs`); `tests/support/chain-world.mjs` takes `builtin`
+(provider -> ids, as `getModels`) and `registered` (registry-only models) instead of one model list
+for every provider, which is how the old harness hid this, and gives `getAll`, `selects` and
+`command`. `tests/loop-back-check.mjs` uses that split. The checks that run the real `multi-sub.ts`
+in a VM put `PoolModelCatalog` in its context.
+**Test:** `tests/antigravity-chain-entries-check.mjs` (a-e; no model calls).
+`ANTIGRAVITY_ENTRIES_SOURCE_REF=37df0b7 node tests/antigravity-chain-entries-check.mjs`: a-d fail
+(d shows the live "2 invalid | 2/4 usable now"); e, the module's own cases, passes.
+**Compat/undo:** no config. Needs a pi whose `ctx.modelRegistry` has `getAll()` (1.0.1 does); without
+it the old built-in-only list and one warning. Revert this commit, reinstall with `pi update
 --extension git:github.com/shine2lay/pi-multi-pass@mine` and load it with `pi-web-deploy restart`.

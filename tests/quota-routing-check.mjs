@@ -18,6 +18,7 @@ import * as refusal from "../extensions/mine/refusal-fallback.ts";
 import * as signin from "../extensions/mine/signin-failover.ts";
 import * as envAllowed from "../extensions/mine/env-allowed-subs.ts";
 import * as fallbackReturn from "../extensions/mine/fallback-return.ts";
+import * as poolModels from "../extensions/mine/pool-models.ts";
 import { isRetryableAssistantError } from "./support/pi-retry-classifier.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -189,7 +190,7 @@ try {
     setModel: async next => { const previousModel = model; model = next; chosen.push(next.provider); await emit("model_select", { model, previousModel, source: "set" }); return true; } };
   const production = runInNewContext(`${executable}\n;({multiSub});`, {
     ...fs, ...path, ...qs, ...policy, ...routing, ...anthropic, ...limits, ...reset, ...fallback, ...countdown, ...subsLimits, ...refusal, ...signin, ...envAllowed, ...fallbackReturn,
-    isRetryableAssistantError,
+    ...poolModels, isRetryableAssistantError,
     Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
     builtinProviders: () => [], getModels: () => ["model-alpha", "model-beta", "model-gamma"].map(id => ({ id })),
     process: { env: {} }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,

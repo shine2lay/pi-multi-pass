@@ -1,6 +1,9 @@
 // One chat driven through the real multi-sub.ts (and fallback-return.ts) by a fake pi: its hooks, model,
 // notices, prompt replays and agent_before_settle continuations, with weekly quota files for the Claude pool.
-// Shared by tests/loop-back-check.mjs and tests/chatgpt-limit-continue-check.mjs.
+// Models as pi has them: pi-ai's built-in catalog per provider (getModels) and pi's live registry
+// (ctx.modelRegistry.getAll), which alone holds providers an extension registers, such as antigravity.
+// Shared by tests/loop-back-check.mjs, tests/chatgpt-limit-continue-check.mjs and
+// tests/antigravity-chain-entries-check.mjs.
 // Plain node: fetch is a recorder that throws (blockNetwork), credentials are fake, no model calls.
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -24,6 +27,7 @@ import * as countdown from "../../extensions/mine/reset-countdown.ts";
 import * as subsLimits from "../../extensions/mine/subs-limits.ts";
 import * as envAllowed from "../../extensions/mine/env-allowed-subs.ts";
 import * as antigravityLimits from "../../extensions/mine/antigravity-limits.ts";
+import * as poolModels from "../../extensions/mine/pool-models.ts";
 import { isRetryableAssistantError } from "./pi-retry-classifier.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -79,13 +83,18 @@ function writeQuota(temp, creds, quotaMembers, room, resetDays = {}) {
 /**
  * One chat on `start` ({ provider, id }) with `config` as multi-pass.json in a fresh agent dir.
  * sources: from loadSources(). quotaMembers: the members that get quota files (see writeQuota).
- * models: the model ids getModels() offers. run(chat) gets notes, model, path, replays and
- * prompt(text), fail(error, id) (turn_end + agent_end + agent_before_settle) and settle(id).
+ * builtin: { provider: model ids } pi-ai's built-in catalog offers (getModels; other providers get none).
+ * registered: [{ provider, id }] only pi's registry holds (an extension's provider); the registry lists
+ * these after every built-in model. run(chat) gets notes, model, path, replays, selects (each
+ * ctx.ui.select: { title, items }), command(name, args) and prompt(text), fail(error, id)
+ * (turn_end + agent_end + agent_before_settle) and settle(id).
  */
-export async function chainWorld({ sources, config, quotaMembers, models, room, start, resetDays }, run) {
+export async function chainWorld({ sources, config, quotaMembers, builtin, registered = [], room, start, resetDays }, run) {
 	assert.ok(sources?.sourceCode && sources?.returnMod, "chainWorld needs sources from loadSources()");
-	assert.ok(config?.pools?.length && quotaMembers?.length && models?.length && room && start?.provider && start?.id,
-		"chainWorld needs config, quotaMembers, models, room and start");
+	assert.ok(config?.pools?.length && quotaMembers?.length && builtin && Object.keys(builtin).length && Array.isArray(registered)
+		&& room && start?.provider && start?.id, "chainWorld needs config, quotaMembers, builtin, registered, room and start");
+	const registryModels = [...Object.entries(builtin).flatMap(([provider, ids]) => ids.map((id) => ({ provider, id }))),
+		...registered.map(({ provider, id }) => ({ provider, id }))];
 	modelFallback.clearModelExhaustion();
 	const creds = fakeCredentials(config);
 	const temp = fs.mkdtempSync(path.join(tmpdir(), "pi-chain-world-"));
@@ -98,22 +107,24 @@ export async function chainWorld({ sources, config, quotaMembers, models, room, 
 		const production = runInNewContext(`${executable}\n;({multiSub, loadGlobalConfig, piWillRetryTurn});`, {
 			...fs, ...path, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
 			...limits, ...reset, ...modelFallback, ...countdown, ...subsLimits, ...envAllowed, ...sources.returnMod, ...antigravityLimits,
-			isRetryableAssistantError,
+			...poolModels, isRetryableAssistantError,
 			Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
 			readStoredCredential: (provider) => creds[provider],
-			builtinProviders: () => [], getModels: () => models.map((id) => ({ id })),
+			builtinProviders: () => [], getModels: (provider) => (builtin[provider] ?? []).map((id) => ({ provider, id })),
 			process: { env: {}, pid: process.pid }, Buffer, URL, Headers, AbortController, AbortSignal, Date, console,
 			fetch: globalThis.fetch,
 		});
 		let current = { ...start };
 		const path_ = [`${current.provider}/${current.id}`];
 		let replays = 0;
-		const events = new Map(), notes = [], commands = new Map();
+		const events = new Map(), notes = [], commands = new Map(), selects = [];
 		const ctx = { cwd: temp, get model() { return current; }, isIdle: () => true, hasUI: true,
 			modelRegistry: {
 				authStorage: { hasAuth: (p) => Boolean(creds[p]), get: (p) => creds[p] },
 				find: (provider, id) => ({ provider, id }), getProviderAuth: async () => undefined,
-			}, ui: { notify: text => notes.push(text), setStatus() {} },
+				getAll: () => registryModels.map((model) => ({ ...model })),
+			}, ui: { notify: text => notes.push(text), setStatus() {},
+				select: async (title, items) => { selects.push({ title, items: [...items] }); return undefined; } },
 		};
 		const emit = async (name, event = {}) => {
 			const results = [];
@@ -133,7 +144,8 @@ export async function chainWorld({ sources, config, quotaMembers, models, room, 
 				{ sourceEntry: { id }, messages: [{ role: "assistant" }] }], pendingMessages: [] } });
 		await emit("session_start", {});
 		return await run({
-			notes, commands, ctx, piWillRetryTurn: production.piWillRetryTurn,
+			notes, commands, ctx, selects, piWillRetryTurn: production.piWillRetryTurn,
+			command: (name, args) => commands.get(name).handler(args, ctx),
 			get model() { return current; }, get path() { return path_; }, get replays() { return replays; },
 			prompt: async (text) => { await emit("input", { text, source: "rpc" }); await emit("before_agent_start", { prompt: text }); },
 			settle: (id) => emit("agent_before_settle", boundary(id)),

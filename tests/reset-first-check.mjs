@@ -18,6 +18,7 @@ import * as refusal from "../extensions/mine/refusal-fallback.ts";
 import * as signin from "../extensions/mine/signin-failover.ts";
 import * as envAllowed from "../extensions/mine/env-allowed-subs.ts";
 import * as fallbackReturn from "../extensions/mine/fallback-return.ts";
+import * as poolModels from "../extensions/mine/pool-models.ts";
 import { isRetryableAssistantError } from "./support/pi-retry-classifier.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -118,7 +119,7 @@ try {
   let requests = [], refreshed = [], httpData = { [a]: raw(4, 1, 10, 10), [b]: raw(1, 4, 80, 70) };
   const exports = runInNewContext(`${executable}\n;({ multiSub, PoolManager });`, {
     ...fs, ...path, ...modelFallback, ...reset, ...limits, ...quotaState, ...quotaPolicy, ...quotaRouting, ...anthropicQuota,
-    ...resetCountdown, ...subsLimits, ...refusal, ...signin, ...envAllowed, ...fallbackReturn, isRetryableAssistantError,
+    ...resetCountdown, ...subsLimits, ...refusal, ...signin, ...envAllowed, ...fallbackReturn, ...poolModels, isRetryableAssistantError,
     Type: { Object: (properties) => ({ type: "object", properties }), Boolean: () => ({ type: "boolean" }), Optional: (schema) => schema },
     getAgentDir: () => temp, builtinProviders: () => [],
     getModels: () => ["claude-fable-5-1", "claude-opus-5", modelId, "gpt-5.5"].map((id) => ({ id })),

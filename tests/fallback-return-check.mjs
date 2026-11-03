@@ -27,6 +27,7 @@ import * as countdown from "../extensions/mine/reset-countdown.ts";
 import * as subsLimits from "../extensions/mine/subs-limits.ts";
 import * as envAllowed from "../extensions/mine/env-allowed-subs.ts";
 import * as antigravityLimits from "../extensions/mine/antigravity-limits.ts";
+import * as poolModels from "../extensions/mine/pool-models.ts";
 import { isRetryableAssistantError } from "./support/pi-retry-classifier.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -116,7 +117,7 @@ async function world({ room, start, startModel, fallbackFlag = true, poolFields,
 			renamePoolConfig, editPoolMembers, changePoolStrategy, togglePoolConfig, buildPoolConfig, persistPoolConfig});`, {
 			...fs, ...path, ...signin, ...refusal, ...quotaState, ...accountPolicy, ...quotaRouting, ...anthropicQuota,
 			...limits, ...reset, ...modelFallback, ...countdown, ...subsLimits, ...envAllowed, ...returnMod, ...antigravityLimits,
-			isRetryableAssistantError,
+			...poolModels, isRetryableAssistantError,
 			Type: { Object: p => p, Optional: p => p, Boolean: () => ({}) }, getAgentDir: () => temp,
 			readStoredCredential: (provider) => creds[provider],
 			builtinProviders: () => [], getModels: () => [{ id: CLAUDE }, { id: SOL }, { id: ARGON }],
