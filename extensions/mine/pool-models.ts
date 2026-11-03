@@ -9,6 +9,10 @@
  * provider or a member, each id once. The registry is read on every call, never cached: an
  * extension may register its provider after multi-pass loads.
  *
+ * The registry is always the handling chat's, passed in by the caller: the module is loaded once for
+ * every chat of a folder, so a stored registry would be some other chat's, and stale (it throws) once
+ * that chat's session is replaced (Ops #769).
+ *
  * No registry (an older pi, or a host without one) -> built-in models only, with one plain warning;
  * models are never guessed.
  */
@@ -32,7 +36,6 @@ export const NO_REGISTRY_WARNING =
 export class PoolModelCatalog {
 	private readonly builtinIds: (provider: string) => readonly string[];
 	private readonly warn: (message: string) => void;
-	private registry: () => RegisteredModelSource | undefined = () => undefined;
 	private warned = false;
 
 	/** builtinIds: pi-ai's built-in model ids for a provider ([] when it has none). warn: where the one warning goes. */
@@ -43,14 +46,14 @@ export class PoolModelCatalog {
 		this.warn = warn;
 	}
 
-	/** Point the catalog at a chat's model registry (an accessor, read at every call). */
-	useRegistry(registry: () => RegisteredModelSource | undefined): void {
-		if (typeof registry !== "function") throw new TypeError("PoolModelCatalog.useRegistry needs an accessor function");
-		this.registry = registry;
-	}
-
-	/** The ids the pool can pick: built-in first, then registry-only ones, each once. */
-	modelIds(pool: PoolModelScope): string[] {
+	/**
+	 * The ids the pool can pick: built-in first, then registry-only ones, each once. registry: the model
+	 * registry of the chat this is for, or undefined when it has none (built-in only, one warning).
+	 */
+	modelIds(pool: PoolModelScope, registry: RegisteredModelSource | undefined): string[] {
+		if (arguments.length < 2) {
+			throw new TypeError("PoolModelCatalog.modelIds needs the chat's model registry (undefined when it has none)");
+		}
 		if (!pool || typeof pool.baseProvider !== "string" || pool.baseProvider.length === 0) {
 			throw new TypeError(`pool ${JSON.stringify(pool?.name ?? "")} needs a baseProvider to list its models`);
 		}
@@ -58,7 +61,6 @@ export class PoolModelCatalog {
 			throw new TypeError(`pool ${JSON.stringify(pool.name ?? pool.baseProvider)} needs a members list to list its models`);
 		}
 		const ids = new Set<string>(this.builtinIds(pool.baseProvider));
-		const registry = this.registry();
 		if (!registry || typeof registry.getAll !== "function") {
 			if (!this.warned) {
 				this.warned = true;

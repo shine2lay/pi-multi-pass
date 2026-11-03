@@ -2695,6 +2695,7 @@ class PoolManager {
 		currentModel: Model<Api>,
 		config: MultiPassConfig,
 		authStorage: { hasAuth(provider: string): boolean; get?(provider: string): unknown },
+		models: RegisteredModelSource | undefined, // mine/antigravity-chain-entries: the handling chat's registry
 		options?: FailoverPlanOptions,
 	): FailoverPlan {
 		const attemptedProviders = options?.attemptedProviders ?? new Set<string>();
@@ -2778,7 +2779,7 @@ class PoolManager {
 				});
 				continue;
 			}
-			const entrySkip = classifyChainEntrySkip(applicable.chain, chainIndex, entry, config);
+			const entrySkip = classifyChainEntrySkip(applicable.chain, chainIndex, entry, config, models);
 			if (entrySkip) {
 				skips.push(entrySkip);
 				continue;
@@ -3398,6 +3399,7 @@ class PoolManager {
 			currentModel,
 			config,
 			getAuthStorage(ctx),
+			chatModelSource(ctx),
 			{
 				attemptedProviders: cascade.attemptedProviders,
 				visitedChainIndexes: cascade.visitedChainIndexes,
@@ -4580,20 +4582,27 @@ async function createAndPersistPool(
 }
 
 // mine/antigravity-chain-entries: pi-ai's built-in models for the base provider, plus the models pi's live
-// registry holds for it or a member (pi-antigravity registers "antigravity" only there). The registry is the
-// chat's, set at session_start and read at every call.
+// registry holds for it or a member (pi-antigravity registers "antigravity" only there). The registry is that
+// of the chat whose event or command is handled (chatModelSource), passed down from there: this module is
+// shared by every chat of a folder, so it keeps none (Ops #769).
 const poolModels = new PoolModelCatalog(
 	(provider) => (getModels(provider as any) as Model<Api>[]).map((model) => model.id),
 	(message) => console.warn(message),
 );
 
-function getSelectableModelsForPool(pool: PoolConfig): string[] {
-	return poolModels.modelIds(pool);
+/** The model registry of the chat this event or command belongs to; read once per entry point. */
+function chatModelSource(ctx: ExtensionContext | ExtensionCommandContext): RegisteredModelSource | undefined {
+	return ctx.modelRegistry as unknown as RegisteredModelSource | undefined;
+}
+
+function getSelectableModelsForPool(pool: PoolConfig, models: RegisteredModelSource | undefined): string[] {
+	return poolModels.modelIds(pool, models);
 }
 
 function createChainValidationError(
 	config: MultiPassConfig,
 	chain: ChainConfig,
+	models: RegisteredModelSource | undefined,
 ): string | null {
 	if (!chain.name.trim()) {
 		return "Chain name is required.";
@@ -4610,7 +4619,7 @@ function createChainValidationError(
 		if (!pool) {
 			return `Chain entry pool "${entry.pool}" does not exist.`;
 		}
-		const selectableModels = getSelectableModelsForPool(pool);
+		const selectableModels = getSelectableModelsForPool(pool, models);
 		if (selectableModels.length === 0) {
 			return `Pool "${pool.name}" has no selectable models for ${pool.baseProvider}.`;
 		}
@@ -4625,13 +4634,14 @@ function createChainValidationError(
 function buildChainConfig(
 	config: MultiPassConfig,
 	input: { name: string; entries: ChainEntryConfig[]; enabled?: boolean },
+	models: RegisteredModelSource | undefined,
 ): { ok: true; chain: ChainConfig } | { ok: false; error: string } {
 	const chain: ChainConfig = {
 		name: input.name.trim(),
 		entries: input.entries.map((entry) => ({ ...entry })),
 		enabled: input.enabled ?? true,
 	};
-	const validationError = createChainValidationError(config, chain);
+	const validationError = createChainValidationError(config, chain, models);
 	if (validationError) {
 		return { ok: false, error: validationError };
 	}
@@ -4653,7 +4663,7 @@ async function inspectPoolConfig(
 	await showWrappedSelect(ctx, {
 		title: `Pool Status: ${pool.name}`,
 		subtitle: "Press Enter or Escape to go back to the pools list.",
-		items: formatPoolStatusLines(pool, getAuthStorage(ctx), poolManager)
+		items: formatPoolStatusLines(pool, getAuthStorage(ctx), poolManager, chatModelSource(ctx))
 			.map((line, index) => ({ value: `${index}:${line}`, label: line })),
 		confirmHint: "back",
 		cancelHint: "back",
@@ -5021,6 +5031,7 @@ function formatPoolStatusLines(
 	pool: PoolConfig,
 	authStorage: { hasAuth(provider: string): boolean },
 	poolManager: Pick<PoolManager, "getAvailableMembers" | "isMemberExhausted"> & Partial<Pick<PoolManager, "signInLabel">>,
+	models: RegisteredModelSource | undefined,
 ): string[] {
 	const summary = summarizePoolHealth(pool, authStorage, poolManager);
 	const strategy = pool.strategy || "round-robin";
@@ -5036,7 +5047,7 @@ function formatPoolStatusLines(
 		if (role) lines.push(role);
 		// mine/loop-back; mine/antigravity-chain-entries: entries the rotation skips are marked in the line
 		const config = loadGlobalConfig();
-		const loop = loopBackLine(config, pool.name, (entry) => getChainEntryIssue(entry as ChainEntryConfig, config));
+		const loop = loopBackLine(config, pool.name, (entry) => getChainEntryIssue(entry as ChainEntryConfig, config, models));
 		if (loop) lines.push(loop);
 	} catch { /* status only */ }
 	if (pool.selectorScript) {
@@ -5084,9 +5095,10 @@ async function handlePoolStatus(
 	}
 
 	const lines: string[] = [];
+	const models = chatModelSource(ctx);
 	for (const pool of config.pools) {
 		lines.push(
-			...formatPoolStatusLines(pool, getAuthStorage(ctx), poolManager),
+			...formatPoolStatusLines(pool, getAuthStorage(ctx), poolManager, models),
 		);
 	}
 
@@ -5097,7 +5109,11 @@ function findChainByName(chains: ChainConfig[], name: string): ChainConfig | und
 	return chains.find((chain) => chain.name === name);
 }
 
-function getChainEntryIssue(entry: ChainEntryConfig, config: MultiPassConfig): string | null {
+function getChainEntryIssue(
+	entry: ChainEntryConfig,
+	config: MultiPassConfig,
+	models: RegisteredModelSource | undefined,
+): string | null {
 	const pool = config.pools.find((candidate) => candidate.name === entry.pool);
 	if (!pool) {
 		return `invalid pool: ${entry.pool} missing`;
@@ -5105,7 +5121,7 @@ function getChainEntryIssue(entry: ChainEntryConfig, config: MultiPassConfig): s
 	if (!pool.enabled) {
 		return `invalid pool: ${pool.name} disabled`;
 	}
-	const selectableModels = getSelectableModelsForPool(pool);
+	const selectableModels = getSelectableModelsForPool(pool, models);
 	if (selectableModels.length === 0) {
 		return `invalid model: no selectable models for ${pool.baseProvider}`;
 	}
@@ -5242,6 +5258,7 @@ function classifyChainEntrySkip(
 	chainIndex: number,
 	entry: ChainEntryConfig,
 	config: MultiPassConfig,
+	models: RegisteredModelSource | undefined,
 ): FailoverSkip | null {
 	if (!entry.enabled) {
 		return {
@@ -5253,7 +5270,7 @@ function classifyChainEntrySkip(
 			chainIndex,
 		};
 	}
-	const issue = getChainEntryIssue(entry, config);
+	const issue = getChainEntryIssue(entry, config, models);
 	if (!issue) return null;
 	const reason = issue.includes("missing")
 		? "missing-pool"
@@ -5273,11 +5290,12 @@ function classifyChainEntrySkip(
 function formatChainEntryStatus(
 	entry: ChainEntryConfig,
 	config?: MultiPassConfig,
+	models?: RegisteredModelSource,
 	authStorage?: { hasAuth(provider: string): boolean },
 	poolManager?: Pick<PoolManager, "getAvailableMembers" | "isMemberExhausted">,
 ): string {
 	const entryState = entry.enabled ? "enabled" : "disabled";
-	const issue = config ? getChainEntryIssue(entry, config) : null;
+	const issue = config ? getChainEntryIssue(entry, config, models) : null;
 	let healthSuffix = "";
 	if (config && authStorage && poolManager) {
 		const pool = config.pools.find((candidate) => candidate.name === entry.pool);
@@ -5293,18 +5311,19 @@ function formatChainEntryStatus(
 function formatChainListLine(
 	chain: ChainConfig,
 	config?: MultiPassConfig,
+	models?: RegisteredModelSource,
 	authStorage?: { hasAuth(provider: string): boolean },
 	poolManager?: Pick<PoolManager, "getAvailableMembers" | "isMemberExhausted">,
 ): string {
 	const entryLabel = chain.entries.length === 1 ? "entry" : "entries";
 	const invalidEntries = config
-		? chain.entries.filter((entry) => getChainEntryIssue(entry, config)).length
+		? chain.entries.filter((entry) => getChainEntryIssue(entry, config, models)).length
 		: 0;
 	let usableEntries = 0;
 	if (config && authStorage && poolManager) {
 		usableEntries = chain.entries.filter((entry) => {
 			if (!entry.enabled) return false;
-			if (getChainEntryIssue(entry, config)) return false;
+			if (getChainEntryIssue(entry, config, models)) return false;
 			const pool = config.pools.find((candidate) => candidate.name === entry.pool);
 			if (!pool || !pool.enabled) return false;
 			return summarizePoolHealth(pool, authStorage, poolManager).availableCount > 0;
@@ -5329,16 +5348,17 @@ function formatChainRemoveOption(chain: ChainConfig): string {
 function formatChainStatusLines(
 	chain: ChainConfig,
 	config?: MultiPassConfig,
+	models?: RegisteredModelSource,
 	authStorage?: { hasAuth(provider: string): boolean },
 	poolManager?: Pick<PoolManager, "getAvailableMembers" | "isMemberExhausted">,
 ): string[] {
 	const invalidEntries = config
-		? chain.entries.filter((entry) => getChainEntryIssue(entry, config)).length
+		? chain.entries.filter((entry) => getChainEntryIssue(entry, config, models)).length
 		: 0;
 	const usableEntries = config && authStorage && poolManager
 		? chain.entries.filter((entry) => {
 			if (!entry.enabled) return false;
-			if (getChainEntryIssue(entry, config)) return false;
+			if (getChainEntryIssue(entry, config, models)) return false;
 			const pool = config.pools.find((candidate) => candidate.name === entry.pool);
 			if (!pool || !pool.enabled) return false;
 			return summarizePoolHealth(pool, authStorage, poolManager).availableCount > 0;
@@ -5365,7 +5385,7 @@ function formatChainStatusLines(
 
 	for (let i = 0; i < chain.entries.length; i++) {
 		const entry = chain.entries[i];
-		lines.push(`  ${i + 1}. ${formatChainEntryStatus(entry, config, authStorage, poolManager)}`);
+		lines.push(`  ${i + 1}. ${formatChainEntryStatus(entry, config, models, authStorage, poolManager)}`);
 	}
 
 	return lines;
@@ -5376,6 +5396,7 @@ async function handlePoolChainCreate(
 	poolManager: PoolManager,
 ): Promise<void> {
 	const config = loadGlobalConfig();
+	const models = chatModelSource(ctx);
 	const chainName = await ctx.ui.input("Chain name", "e.g. primary-fallback");
 	if (!chainName?.trim()) return;
 	if (findChainByName(config.chains, chainName.trim())) {
@@ -5389,7 +5410,7 @@ async function handlePoolChainCreate(
 		const latestConfig = loadGlobalConfig();
 		const availablePools = latestConfig.pools;
 		const options = [
-			`--- Selected (${entries.length}): ${entries.map((entry) => formatChainEntryStatus(entry, latestConfig)).join(", ") || "none"} ---`,
+			`--- Selected (${entries.length}): ${entries.map((entry) => formatChainEntryStatus(entry, latestConfig, models)).join(", ") || "none"} ---`,
 			...availablePools.map((pool) => `${pool.name} -- ${pool.baseProvider} (${pool.enabled ? "enabled" : "disabled"})`),
 			"[Create pool inline]",
 			"[Done - save chain]",
@@ -5428,7 +5449,7 @@ async function handlePoolChainCreate(
 			continue;
 		}
 
-		const selectableModels = getSelectableModelsForPool(pool);
+		const selectableModels = getSelectableModelsForPool(pool, models);
 		if (selectableModels.length === 0) {
 			ctx.ui.notify(
 				`Pool "${pool.name}" has no selectable models for ${pool.baseProvider}.`,
@@ -5455,7 +5476,7 @@ async function handlePoolChainCreate(
 		name: chainName.trim(),
 		entries,
 		enabled: true,
-	});
+	}, models);
 	if (!built.ok) {
 		ctx.ui.notify(built.error, "warning");
 		return;
@@ -5482,7 +5503,7 @@ async function handlePoolChainList(
 	await ctx.ui.select(
 		"Chains",
 		config.chains.map((chain) =>
-			formatChainListLine(chain, config, getAuthStorage(ctx), poolManager),
+			formatChainListLine(chain, config, chatModelSource(ctx), getAuthStorage(ctx), poolManager),
 		),
 	);
 }
@@ -5562,7 +5583,7 @@ async function handlePoolChainStatus(
 
 	await ctx.ui.select(
 		`Chain Status: ${chain.name}`,
-		formatChainStatusLines(chain, config, getAuthStorage(ctx), poolManager),
+		formatChainStatusLines(chain, config, chatModelSource(ctx), getAuthStorage(ctx), poolManager),
 	);
 }
 
@@ -6328,7 +6349,6 @@ export default function multiSub(pi: ExtensionAPI) {
 
 	// On session start, reload pools with project-level config
 	pi.on("session_start", async (_event, ctx) => {
-		poolModels.useRegistry(() => ctx.modelRegistry as unknown as RegisteredModelSource); // mine/antigravity-chain-entries
 		refusalFallback.reset();
 		const effective = loadEffectiveConfig(ctx.cwd);
 		poolManager.loadPools(effective.pools);

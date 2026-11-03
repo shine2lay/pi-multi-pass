@@ -106,27 +106,25 @@ const cases = [
 		const claudePool = { name: "claude-real", baseProvider: "anthropic", members: ["anthropic", "anthropic-2"] };
 		const antigravityPool = { name: "antigravity-fallback", baseProvider: "antigravity", members: ["antigravity"] };
 		// No registry: built-in only, one plain warning however often it is asked.
-		assert.deepEqual(catalog.modelIds(claudePool), [CLAUDE, "claude-opus-5"]);
-		assert.deepEqual(catalog.modelIds(antigravityPool), []);
-		catalog.useRegistry(() => ({ find() {} })); // a registry without getAll: the same
-		assert.deepEqual(catalog.modelIds(antigravityPool), []);
+		assert.deepEqual(catalog.modelIds(claudePool, undefined), [CLAUDE, "claude-opus-5"]);
+		assert.deepEqual(catalog.modelIds(antigravityPool, undefined), []);
+		assert.deepEqual(catalog.modelIds(antigravityPool, { find() {} }), []); // a registry without getAll: the same
 		assert.deepEqual(warnings, [NO_REGISTRY_WARNING], "one warning");
 		// The registry is read at every call: a provider registered later shows up.
 		let models = [];
-		catalog.useRegistry(() => ({ getAll: () => models }));
-		assert.deepEqual(catalog.modelIds(antigravityPool), []);
+		const registry = { getAll: () => models };
+		assert.deepEqual(catalog.modelIds(antigravityPool, registry), []);
 		models = [{ provider: "anthropic", id: CLAUDE }, { provider: "anthropic-2", id: "claude-member-only" },
 			{ provider: "antigravity", id: ARGON }, { provider: "antigravity", id: CLAUDE }, { provider: "openai", id: "gpt-x" },
 			{ provider: "antigravity", id: 7 }, null];
-		assert.deepEqual(catalog.modelIds(claudePool), [CLAUDE, "claude-opus-5", "claude-member-only"]);
-		assert.deepEqual(catalog.modelIds(antigravityPool), [ARGON, CLAUDE]);
+		assert.deepEqual(catalog.modelIds(claudePool, registry), [CLAUDE, "claude-opus-5", "claude-member-only"]);
+		assert.deepEqual(catalog.modelIds(antigravityPool, registry), [ARGON, CLAUDE]);
 		assert.equal(warnings.length, 1, "no more warnings once a registry answers");
 		// Fail loud on what it can't work from.
-		assert.throws(() => catalog.modelIds({ name: "x", members: [] }), /needs a baseProvider/);
-		assert.throws(() => catalog.modelIds({ name: "x", baseProvider: "antigravity" }), /needs a members list/);
-		catalog.useRegistry(() => ({ getAll: () => "not a list" }));
-		assert.throws(() => catalog.modelIds(antigravityPool), /getAll\(\) did not return a list/);
-		assert.throws(() => catalog.useRegistry({ getAll: () => [] }), /needs an accessor function/);
+		assert.throws(() => catalog.modelIds({ name: "x", members: [] }, registry), /needs a baseProvider/);
+		assert.throws(() => catalog.modelIds({ name: "x", baseProvider: "antigravity" }, registry), /needs a members list/);
+		assert.throws(() => catalog.modelIds(antigravityPool, { getAll: () => "not a list" }), /getAll\(\) did not return a list/);
+		assert.throws(() => catalog.modelIds(antigravityPool), /needs the chat's model registry/);
 		assert.throws(() => new PoolModelCatalog(undefined, () => {}), /needs builtinIds/);
 	}],
 ];
