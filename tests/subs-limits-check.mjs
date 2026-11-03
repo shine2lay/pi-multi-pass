@@ -410,6 +410,24 @@ assert.equal(retryAfterMs(null), undefined);
 	const out = await checkAccount(gone, listAccounts(gone, undefined, NOW)[0], undefined, opts(newFile(), none));
 	assert.equal(out.failure.reason, "signed-out");
 
+	// Only a real api_key entry is an API key. A malformed entry (11-02: {result,next} left in
+	// auth.json by a bad write) or an unknown type is no login: signed out, with a hint, no call.
+	const malformed = { result: { type: "oauth" }, next: {} };
+	const slotOf = (host, provider) => listAccounts(host, undefined, NOW).find((s) => s.provider === provider);
+	for (const [provider, stored] of [["anthropic-2", malformed], ["anthropic-3", { type: "session", token: "x" }], ["openai-codex-2", malformed]]) {
+		const broken = makeHost({ creds: { [provider]: stored }, configured: [{ provider }], checkOther: async () => { throw new Error("must not be called"); } });
+		const row = await checkAccount(broken, slotOf(broken, provider), undefined, opts(newFile(), none));
+		assert.deepEqual([row.failure.reason, row.failure.text, none.calls.length],
+			["signed-out", "signed out (saved login unreadable); sign in again", 0], `${provider}: malformed login reads as signed out, not an API key`);
+	}
+	const keyed = makeHost({ creds: { "anthropic-2": { type: "api_key", key: "k" } }, configured: [{ provider: "anthropic-2" }] });
+	const keyRow = await checkAccount(keyed, slotOf(keyed, "anthropic-2"), undefined, opts(newFile(), none));
+	assert.deepEqual([keyRow.failure.reason, keyRow.failure.text], ["not-subscription", REASON_TEXT["not-subscription"]], "a real API key still says so");
+	const spoilCreds = { anthropic: oauth("old", NOW - 1000) };
+	const spoiled = makeHost({ creds: spoilCreds, refresh: async (p) => { spoilCreds[p] = malformed; } });
+	const spoiledRow = await checkAccount(spoiled, slot, undefined, opts(newFile(), none));
+	assert.equal(spoiledRow.failure.reason, "signed-out", "an entry spoiled by the refresh is signed out too");
+
 	// A 401 while the stored expires timestamp is still in the future (e.g. OpenAI invalidates a
 	// 10-day Codex access token early) forces one locked refresh via host.refresh(provider, true)
 	// and retries the check once before recording sign-in-expired.

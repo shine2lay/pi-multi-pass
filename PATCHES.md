@@ -317,6 +317,10 @@ left panel (a Limits box under History, with a refresh button).
   { minOAuthValidityMs: 365d })` and retries once before reporting `sign-in-expired`. Tokens within
   2 minutes of expiry count as expired, so no checker ever refreshes on its own. Nothing writes
   auth.json; no token is logged or stored.
+- **Stored entry kinds** (`credentialFailure`): `oauth` is checked; only `api_key` says "signed in
+  with an API key"; any other entry (no type, unknown type, or malformed like the `{result,next}`
+  left in auth.json on 2026-11-02, which made Claude 1-3 look like API keys) says "signed out (saved
+  login unreadable); sign in again", reason `signed-out`. Ops #757, Architecture rm-3af8dd22.
 - **One file:** `~/.pi/agent/multi-pass-quota/subs-limits.json` (version 1), written whole (temp +
   rename). Numbers seen in normal replies (Anthropic quota headers, the footer's Codex checks) update
   their account's row for free, but only once a check has created the rows. Readings from the usage
@@ -337,7 +341,7 @@ handler withdraws it; the `/subs` case runs the check (`--probe` only gets a not
 harnesses (`tests/reset-first-check.mjs`, `tests/quota-routing-check.mjs`) spread the new module into
 their context.
 **Test:** `node tests/subs-limits-check.mjs` (fake fetch, temp files, no real calls): every account
-gets a row (signed out, API key, unknown provider, configured-but-signed-out, gone-but-seen); the
+gets a row (signed out, API key, malformed entry = signed out, unknown provider, configured-but-signed-out, gone-but-seen); the
 usage page's windows (legacy fields, `limits[]`, per-model, null resets); ChatGPT windows of any
 length (a Free plan's 30-day one, from the reply's real shape); profile → plan; an expired
 token goes through `refresh` and is re-read, a failed refresh says "sign-in expired"; 401/429/5xx,

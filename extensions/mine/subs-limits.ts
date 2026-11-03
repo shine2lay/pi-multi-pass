@@ -566,6 +566,18 @@ async function readProfile(access: string, o: Resolved): Promise<{ email?: strin
 	}
 }
 
+/**
+ * Why a stored entry is no subscription login, or undefined for an OAuth login. Only a real
+ * `api_key` entry is an API key; a missing type or an unreadable entry (11-02: `{result,next}`
+ * left by a bad write) is no login at all, so the row says signed out, with a hint.
+ */
+function credentialFailure(credential: LimitsCredential | undefined): [FailureReason, string?] | undefined {
+	if (!credential) return ["signed-out"];
+	if (credential.type === "oauth") return undefined;
+	if (credential.type === "api_key") return ["not-subscription"];
+	return ["signed-out", "signed out (saved login unreadable); sign in again"];
+}
+
 /** One account. Never throws: every outcome is a row. */
 export async function checkAccount(
 	host: LimitsHost, slot: AccountSlot, previous: LimitsAccount | undefined, options: CheckOptions,
@@ -586,14 +598,14 @@ export async function checkAccount(
 
 	try {
 		let credential = host.stored(slot.provider);
-		if (!credential) return fail("signed-out");
-		if (credential.type !== "oauth") return fail("not-subscription");
+		let unusable = credentialFailure(credential);
+		if (unusable || !credential) return fail(...(unusable ?? ["signed-out"]));
 		if (host.refresh) {
 			// pi's own refresh: it runs only when the token is close to expiry, under pi's lock.
 			try { await host.refresh(slot.provider); } catch { /* reported by the expiry check below */ }
 			credential = host.stored(slot.provider);
-			if (!credential) return fail("signed-out");
-			if (credential.type !== "oauth") return fail("not-subscription");
+			unusable = credentialFailure(credential);
+			if (unusable || !credential) return fail(...(unusable ?? ["signed-out"]));
 		}
 		for (let forced = false; ; forced = true) {
 			const access = typeof credential.access === "string" ? credential.access : "";
@@ -617,8 +629,8 @@ export async function checkAccount(
 				if (response.status === 401 && !forced && host.refresh) {
 					try { await host.refresh(slot.provider, true); } catch { return fail("sign-in-expired"); }
 					credential = host.stored(slot.provider);
-					if (!credential) return fail("signed-out");
-					if (credential.type !== "oauth") return fail("not-subscription");
+					unusable = credentialFailure(credential);
+					if (unusable || !credential) return fail(...(unusable ?? ["signed-out"]));
 					continue;
 				}
 				if (!response.ok) return fail(...failureFor(response.status));
@@ -660,8 +672,8 @@ export async function checkAccount(
 			if (log.status === 401 && !forced && host.refresh) {
 				try { await host.refresh(slot.provider, true); } catch { return fail("sign-in-expired"); }
 				credential = host.stored(slot.provider);
-				if (!credential) return fail("signed-out");
-				if (credential.type !== "oauth") return fail("not-subscription");
+				unusable = credentialFailure(credential);
+				if (unusable || !credential) return fail(...(unusable ?? ["signed-out"]));
 				continue;
 			}
 			if (log.status !== undefined && log.status >= 400) return fail(...failureFor(log.status));
