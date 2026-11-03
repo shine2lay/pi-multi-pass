@@ -460,8 +460,8 @@ export interface LimitsHost {
 	bases(): readonly string[];
 	/** Read-only view of pi's stored sign-in. */
 	stored(provider: string): LimitsCredential | undefined;
-	/** pi's own pre-request refresh (under pi's lock, written back by pi). */
-	refresh?(provider: string): Promise<unknown>;
+	/** pi's own pre-request refresh (under pi's lock, written back by pi); `force` rotates even before `expires`. */
+	refresh?(provider: string, force?: boolean): Promise<unknown>;
 	/** The existing checker for a non-Anthropic provider; undefined when it has none. */
 	checkOther?(
 		provider: string, base: string, credential: LimitsCredential, fetch: FetchLike, signal?: AbortSignal,
@@ -593,64 +593,81 @@ export async function checkAccount(
 			try { await host.refresh(slot.provider); } catch { /* reported by the expiry check below */ }
 			credential = host.stored(slot.provider);
 			if (!credential) return fail("signed-out");
+			if (credential.type !== "oauth") return fail("not-subscription");
 		}
-		const access = typeof credential.access === "string" ? credential.access : "";
-		const expires = finite(credential.expires) ? credential.expires : undefined;
-		if (!access || (expires !== undefined && expires <= o.now() + EXPIRY_MARGIN_MS)) return fail("sign-in-expired");
+		for (let forced = false; ; forced = true) {
+			const access = typeof credential.access === "string" ? credential.access : "";
+			const expires = finite(credential.expires) ? credential.expires : undefined;
+			if (!access || (expires !== undefined && expires <= o.now() + EXPIRY_MARGIN_MS)) return fail("sign-in-expired");
 
-		const log: FetchLog = { attempts: 0 };
-		const fetchReliably = reliableFetch(o.fetch, log, o);
-		if (slot.base === "anthropic") {
-			const wantProfile = !row.email || !row.plan || !row.profileAt || o.now() - row.profileAt > PROFILE_MAX_AGE_MS;
-			const profile = wantProfile ? readProfile(access, o) : Promise.resolve(undefined);
-			let response: Response | undefined;
-			try {
-				response = await fetchReliably(ANTHROPIC_USAGE_URL, { method: "GET", headers: anthropicHeaders(access) });
-			} catch {
-				response = undefined;
+			const log: FetchLog = { attempts: 0 };
+			const fetchReliably = reliableFetch(o.fetch, log, o);
+			if (slot.base === "anthropic") {
+				const wantProfile = !row.email || !row.plan || !row.profileAt || o.now() - row.profileAt > PROFILE_MAX_AGE_MS;
+				const profile = wantProfile ? readProfile(access, o) : Promise.resolve(undefined);
+				let response: Response | undefined;
+				try {
+					response = await fetchReliably(ANTHROPIC_USAGE_URL, { method: "GET", headers: anthropicHeaders(access) });
+				} catch {
+					response = undefined;
+				}
+				const who = await profile;
+				if (who) row = { ...row, email: who.email ?? row.email, plan: who.plan ?? row.plan, profileAt: o.now() };
+				if (!response) return fail(log.timedOut ? "timeout" : "no-answer");
+				if (response.status === 401 && !forced && host.refresh) {
+					try { await host.refresh(slot.provider, true); } catch { return fail("sign-in-expired"); }
+					credential = host.stored(slot.provider);
+					if (!credential) return fail("signed-out");
+					if (credential.type !== "oauth") return fail("not-subscription");
+					continue;
+				}
+				if (!response.ok) return fail(...failureFor(response.status));
+				let usage: ReturnType<typeof parseAnthropicUsage>;
+				try { usage = parseAnthropicUsage(await response.json()); } catch { usage = undefined; }
+				if (!usage) return fail("error", "check failed (no usage numbers in the reply)");
+				return good(usage.windows, usage.limited);
 			}
-			const who = await profile;
-			if (who) row = { ...row, email: who.email ?? row.email, plan: who.plan ?? row.plan, profileAt: o.now() };
-			if (!response) return fail(log.timedOut ? "timeout" : "no-answer");
-			if (!response.ok) return fail(...failureFor(response.status));
-			let usage: ReturnType<typeof parseAnthropicUsage>;
-			try { usage = parseAnthropicUsage(await response.json()); } catch { usage = undefined; }
-			if (!usage) return fail("error", "check failed (no usage numbers in the reply)");
-			return good(usage.windows, usage.limited);
-		}
 
-		// Other checkers may make calls of their own: one deadline for the whole account.
-		const overall = new AbortController();
-		const timer = setTimeout(() => overall.abort(new LimitsFetchError("timed out")),
-			2 * o.timeoutMs + o.retryDelayMs + o.retryAfterCapMs);
-		let result: OtherCheckResult | undefined;
-		try {
-			result = host.checkOther
-				? await untilAborted(host.checkOther(slot.provider, slot.base, credential, fetchReliably, overall.signal), overall.signal)
-				: undefined;
-		} catch (error) {
-			// A checker that lets the fetch error escape still gets the plain reason.
-			if (overall.signal.aborted || log.timedOut) return fail("timeout");
+			// Other checkers may make calls of their own: one deadline for the whole account.
+			const overall = new AbortController();
+			const timer = setTimeout(() => overall.abort(new LimitsFetchError("timed out")),
+				2 * o.timeoutMs + o.retryDelayMs + o.retryAfterCapMs);
+			let result: OtherCheckResult | undefined;
+			try {
+				result = host.checkOther
+					? await untilAborted(host.checkOther(slot.provider, slot.base, credential, fetchReliably, overall.signal), overall.signal)
+					: undefined;
+			} catch (error) {
+				// A checker that lets the fetch error escape still gets the plain reason.
+				if (overall.signal.aborted || log.timedOut) return fail("timeout");
+				if (log.network) return fail("no-answer");
+				throw error;
+			} finally {
+				clearTimeout(timer);
+			}
+			if (!result) return fail("unsupported");
+			if (result.kind === "missing-auth") return fail("signed-out");
+			const read = (result.usageWindows ?? []).filter((w) => w && text(w.key, 60) && text(w.label, 60) && finite(w.usedPercent))
+				.map((w) => ({ ...w, usedPercent: clampPercent(w.usedPercent!), resetAt: toSeconds(w.resetAt) })).slice(0, 20);
+			const windows = read.length > 0 ? read : windowsFromChecker(result.windows);
+			if ((result.kind !== "error" || read.length > 0) && windows.length > 0) {
+				return good(windows, Boolean(result.limited) || windows.some((w) => w.limited), {
+					plan: planName(result.plan) ?? row.plan, email: text(result.email, 120) ?? row.email,
+				});
+			}
+			if (log.timedOut) return fail("timeout");
 			if (log.network) return fail("no-answer");
-			throw error;
-		} finally {
-			clearTimeout(timer);
+			if (log.status === 401 && !forced && host.refresh) {
+				try { await host.refresh(slot.provider, true); } catch { return fail("sign-in-expired"); }
+				credential = host.stored(slot.provider);
+				if (!credential) return fail("signed-out");
+				if (credential.type !== "oauth") return fail("not-subscription");
+				continue;
+			}
+			if (log.status !== undefined && log.status >= 400) return fail(...failureFor(log.status));
+			if (log.status !== undefined) return fail("error", "check failed (no usage numbers in the reply)");
+			return fail("error", `check failed (${shortError(result.summary) || "unknown"})`);
 		}
-		if (!result) return fail("unsupported");
-		if (result.kind === "missing-auth") return fail("signed-out");
-		const read = (result.usageWindows ?? []).filter((w) => w && text(w.key, 60) && text(w.label, 60) && finite(w.usedPercent))
-			.map((w) => ({ ...w, usedPercent: clampPercent(w.usedPercent!), resetAt: toSeconds(w.resetAt) })).slice(0, 20);
-		const windows = read.length > 0 ? read : windowsFromChecker(result.windows);
-		if ((result.kind !== "error" || read.length > 0) && windows.length > 0) {
-			return good(windows, Boolean(result.limited) || windows.some((w) => w.limited), {
-				plan: planName(result.plan) ?? row.plan, email: text(result.email, 120) ?? row.email,
-			});
-		}
-		if (log.timedOut) return fail("timeout");
-		if (log.network) return fail("no-answer");
-		if (log.status !== undefined && log.status >= 400) return fail(...failureFor(log.status));
-		if (log.status !== undefined) return fail("error", "check failed (no usage numbers in the reply)");
-		return fail("error", `check failed (${shortError(result.summary) || "unknown"})`);
 	} catch (error) {
 		return fail("error", `check failed (${shortError(error instanceof Error ? error.message : error) || "unknown"})`);
 	}

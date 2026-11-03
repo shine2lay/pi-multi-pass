@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { runInNewContext } from "node:vm";
 import {
 	ANTHROPIC_PROFILE_URL, ANTHROPIC_USAGE_URL, LIMITS_CHANNEL_KEY, REASON_TEXT,
 	baseOf, checkAccount, checkAllLimits, formatAccountLine, formatAgo, formatLimitWindow, formatLimitsText,
@@ -407,6 +409,71 @@ assert.equal(retryAfterMs(null), undefined);
 	const gone = makeHost({ creds: {}, configured: [{ provider: "anthropic-2" }] });
 	const out = await checkAccount(gone, listAccounts(gone, undefined, NOW)[0], undefined, opts(newFile(), none));
 	assert.equal(out.failure.reason, "signed-out");
+
+	// A 401 while the stored expires timestamp is still in the future (e.g. OpenAI invalidates a
+	// 10-day Codex access token early) forces one locked refresh via host.refresh(provider, true)
+	// and retries the check once before recording sign-in-expired.
+	const codexSlot = { provider: "openai-codex", base: "openai-codex", number: 1, name: "ChatGPT 1" };
+	const refreshCalls = [];
+	const codexCreds = { "openai-codex": oauth("codex-stale", NOW + 10 * DAY) };
+	const recoverHost = makeHost({
+		creds: codexCreds,
+		refresh: async (p, force) => {
+			refreshCalls.push([p, force]);
+			if (force) codexCreds[p] = oauth("codex-fresh", NOW + 10 * DAY);
+		},
+		checkOther: codexLike,
+	});
+	const recoverFetch = makeFetch((c) => {
+		if (c.url === WHAM && c.auth === "Bearer codex-stale") return json({ error: { code: "token_expired" } }, 401);
+		if (c.url === WHAM && c.auth === "Bearer codex-fresh") return json({ five: 15, week: 30 });
+		throw new Error(`unexpected call ${c.url} ${c.auth}`);
+	});
+	const recovered = await checkAccount(recoverHost, codexSlot, undefined, opts(newFile(), recoverFetch));
+	assert.equal(recovered.failure, undefined, "401 on first checkOther triggers host.refresh(provider, true) and succeeds on retry");
+	assert.deepEqual(recovered.windows.map((w) => [w.key, w.usedPercent]), [["5h", 15], ["7d", 30]]);
+	assert.deepEqual(refreshCalls, [["openai-codex", undefined], ["openai-codex", true]]);
+	assert.deepEqual(recoverFetch.calls.map((c) => c.auth), ["Bearer codex-stale", "Bearer codex-fresh"]);
+
+	// Anthropic 401 -> forced refresh -> 200 recovery.
+	const claudeCalls = [];
+	const claudeCreds = { anthropic: oauth("claude-stale", NOW + 8 * HOUR) };
+	const claudeRecoverHost = makeHost({
+		creds: claudeCreds,
+		refresh: async (p, force) => {
+			claudeCalls.push([p, force]);
+			if (force) claudeCreds[p] = oauth("claude-fresh", NOW + 8 * HOUR);
+		},
+	});
+	const claudeRecoverFetch = makeFetch((c) => {
+		if (c.auth === "Bearer claude-stale") return json({ error: "token_expired" }, 401);
+		if (c.url === ANTHROPIC_USAGE_URL && c.auth === "Bearer claude-fresh") return json(usage(8, 22));
+		if (c.url === ANTHROPIC_PROFILE_URL && c.auth === "Bearer claude-fresh") return json(PROFILE_MAX);
+		throw new Error(`unexpected call ${c.url} ${c.auth}`);
+	});
+	const claudeRecovered = await checkAccount(claudeRecoverHost, slot, undefined, opts(newFile(), claudeRecoverFetch));
+	assert.equal(claudeRecovered.failure, undefined);
+	assert.deepEqual(claudeRecovered.windows.map((w) => [w.key, w.usedPercent]), [["5h", 8], ["7d", 22]]);
+	assert.deepEqual(claudeCalls, [["anthropic", undefined], ["anthropic", true]]);
+
+	// 401 on retry still records sign-in-expired after exactly one forced refresh (never loops).
+	const retry401Calls = [];
+	const stillStaleCreds = { "openai-codex": oauth("codex-dead-1", NOW + 10 * DAY) };
+	const retry401Host = makeHost({
+		creds: stillStaleCreds,
+		refresh: async (p, force) => {
+			retry401Calls.push([p, force]);
+			if (force) stillStaleCreds[p] = oauth("codex-dead-2", NOW + 10 * DAY);
+		},
+		checkOther: codexLike,
+	});
+	const retry401Fetch = makeFetch(() => json({ error: { code: "token_expired" } }, 401));
+	const keptCodex = { provider: "openai-codex", base: "openai-codex", number: 1, name: "ChatGPT 1", windows: [{ key: "5h", label: "5-hour", usedPercent: 10 }], checkedAt: NOW - HOUR, source: "check" };
+	const stillExpired = await checkAccount(retry401Host, codexSlot, keptCodex, opts(newFile(), retry401Fetch));
+	assert.deepEqual([stillExpired.failure?.reason, stillExpired.windows[0].usedPercent, stillExpired.checkedAt],
+		["sign-in-expired", 10, NOW - HOUR], "401 on retry records sign-in-expired and keeps last good numbers");
+	assert.deepEqual(retry401Calls, [["openai-codex", undefined], ["openai-codex", true]], "at most one forced refresh per checkAccount");
+	assert.deepEqual(retry401Fetch.calls.map((c) => c.auth), ["Bearer codex-dead-1", "Bearer codex-dead-2"], "checked once before and once after forced refresh");
 }
 
 /* --- a checker that lets the fetch error escape still gets the plain reason --- */
@@ -649,7 +716,8 @@ assert.equal(retryAfterMs(null), undefined);
 	const mod = readFileSync(new URL("../extensions/mine/subs-limits.ts", import.meta.url), "utf8");
 	assert.doesNotMatch(src, /subs-status\.ts|anthropic-probe\.ts|probeAnthropicQuota|refreshAllSubsStatus|probeMissingSubs|collectAllSubAccounts/);
 	assert.match(src, /from "\.\/mine\/subs-limits\.ts"/);
-	assert.match(src, /refresh: async \(provider\) => registry\(\)\?\.getProviderAuth\(provider\)/, "sign-ins refresh only through pi's own store");
+	assert.match(src, /refresh: async \(provider, force\) =>[\s\S]{0,600}reg\?\.getProviderAuth\(provider\)/, "sign-ins refresh only through pi's own store");
+	assert.match(src, /runtime\.getAuth\(provider, \{ minOAuthValidityMs: 365 \* 24 \* 3600 \* 1000 \}\)/, "forced 401 refresh rotates OAuth through runtime.getAuth");
 	assert.match(src, /async check\(account: QuotaAccount, signal\?: AbortSignal, fetchImpl: typeof fetch = fetch\)/);
 	assert.match(src, /await fetchImpl\(`\$\{baseUrl\}\/wham\/usage`/);
 	const checkers = src.match(/const PROVIDER_QUOTA_CHECKERS[^;]*;/)?.[0] ?? "";
@@ -670,6 +738,32 @@ assert.equal(retryAfterMs(null), undefined);
 	const hostFn = src.slice(src.indexOf("function limitsHost("), src.indexOf("const codexQuotaChecker"));
 	assert.ok(hostFn.length > 0);
 	assert.doesNotMatch(hostFn, /ctx\.model|modelId|\.model\b/, "the check never depends on a chat's model");
+	const makeRealHost = runInNewContext(`${stripTypeScriptTypes(hostFn, { mode: "strip", disableExperimentalWarning: true })}\n;limitsHost;`, {
+		normalizeEntries: () => [], mergeConfigs: () => [], loadGlobalConfig: () => ({}), parseEnvConfig: () => [],
+		subProviderName: (x) => x, PROVIDER_TEMPLATES: {}, readStoredCredential: () => undefined, PROVIDER_QUOTA_CHECKERS: [],
+	});
+	const authCalls = [];
+	const regWithRuntime = {
+		getProviderAuth: async (p) => { authCalls.push(["getProviderAuth", p]); return { ok: true }; },
+		runtime: {
+			getAuth: async (p, opts) => {
+				authCalls.push(["runtime.getAuth", p, opts?.minOAuthValidityMs]);
+				if (p === "openai-codex") throw new Error("OAuth refresh returned a token that expires too soon for openai-codex");
+				if (p === "broken") throw new Error("OAuth refresh failed for broken");
+				return { ok: true };
+			},
+		},
+	};
+	await makeRealHost(() => regWithRuntime).refresh("openai-codex");
+	await makeRealHost(() => regWithRuntime).refresh("openai-codex", true);
+	await assert.rejects(makeRealHost(() => regWithRuntime).refresh("broken", true), /OAuth refresh failed for broken/);
+	await makeRealHost(() => ({ getProviderAuth: regWithRuntime.getProviderAuth })).refresh("openai-codex", true);
+	assert.deepEqual(authCalls, [
+		["getProviderAuth", "openai-codex"],
+		["runtime.getAuth", "openai-codex", 365 * 24 * 3600 * 1000],
+		["runtime.getAuth", "broken", 365 * 24 * 3600 * 1000],
+		["getProviderAuth", "openai-codex"],
+	]);
 	assert.match(src, /"multi-pass-limits"/, "the footer's current-account box stays");
 	assert.equal((mod.match(/writeFileSync\(/g) ?? []).length, 1, "the readings file is the only thing written");
 	assert.doesNotMatch(mod, /console\.|auth\.json"/, "no logging (no token can leak), no auth.json path");

@@ -311,9 +311,12 @@ left panel (a Limits box under History, with a refresh button).
 - **Failures keep the last numbers** with the reason in plain words: signed out, sign-in expired
   (refreshes when the account is next used), provider busy (429), timed out, no answer, check failed.
 - **Sign-ins:** refreshed only through pi's own store (`ModelRegistry.getProviderAuth`, the refresh
-  pi runs before a request, under its lock, written back by pi). Tokens within 2 minutes of expiry
-  count as expired, so no checker ever refreshes on its own. Nothing writes auth.json; no token is
-  logged or stored.
+  pi runs before a request, under its lock, written back by pi). When a usage check gets HTTP 401
+  while the stored `expires` timestamp is still in the future (e.g. a 10-day `openai-codex` token
+  invalidated early), `checkAccount` forces one locked refresh through `runtime.getAuth(provider,
+  { minOAuthValidityMs: 365d })` and retries once before reporting `sign-in-expired`. Tokens within
+  2 minutes of expiry count as expired, so no checker ever refreshes on its own. Nothing writes
+  auth.json; no token is logged or stored.
 - **One file:** `~/.pi/agent/multi-pass-quota/subs-limits.json` (version 1), written whole (temp +
   rename). Numbers seen in normal replies (Anthropic quota headers, the footer's Codex checks) update
   their account's row for free, but only once a check has created the rows. Readings from the usage

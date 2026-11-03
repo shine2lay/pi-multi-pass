@@ -1433,7 +1433,18 @@ function limitsHost(registry: () => ExtensionContext["modelRegistry"] | undefine
 			.map((entry) => ({ provider: subProviderName(entry), label: entry.label })),
 		bases: () => [...Object.keys(PROVIDER_TEMPLATES), "antigravity"],
 		stored: (provider) => readStoredCredential(provider) as LimitsCredential | undefined,
-		refresh: async (provider) => registry()?.getProviderAuth(provider),
+		refresh: async (provider, force) => {
+			const reg = registry();
+			if (force && (reg as any)?.runtime?.getAuth) {
+				try {
+					return await (reg as any).runtime.getAuth(provider, { minOAuthValidityMs: 365 * 24 * 3600 * 1000 });
+				} catch (error) {
+					if (typeof (error as { message?: unknown })?.message === "string" && (error as { message: string }).message.includes("expires too soon")) return undefined;
+					throw error;
+				}
+			}
+			return reg?.getProviderAuth(provider);
+		},
 		checkOther: async (provider, base, credential, fetchImpl, signal) => {
 			const checker = PROVIDER_QUOTA_CHECKERS.find((c) => c.baseProvider === base);
 			if (!checker) return undefined;
