@@ -600,6 +600,9 @@ assert.equal(retryAfterMs(null), undefined);
 	] };
 	assert.deepEqual(names(makeHost({}), seen), [["openai", "ChatGPT"]], "the legacy row shows only while it holds a sign-in");
 	assert.deepEqual(names(makeHost({ configured: [{ provider: "openai-codex-2" }] })), [["openai-codex-2", "ChatGPT (legacy) 2"]], "a configured sub stays");
+	// The live host no longer lists "openai" (owner 2026-11-04): signed in or seen before, no row.
+	const withoutOpenai = { ...makeHost({ creds: { openai: oauth("o"), "openai-codex": oauth("c") } }), bases: () => BASES.filter((b) => b !== "openai") };
+	assert.deepEqual(names(withoutOpenai, seen), [["openai-codex", "ChatGPT (legacy)"]], "a base the host doesn't list gets no row, not even from old readings");
 
 	// The check: nothing is asked for the ChatGPT sign-in, and no numbers is a note, not a failure.
 	const file = newFile();
@@ -858,7 +861,8 @@ assert.equal(retryAfterMs(null), undefined);
 		["runtime.getAuth", "broken", 365 * 24 * 3600 * 1000],
 		["getProviderAuth", "openai-codex"],
 	]);
-	assert.match(hostFn, /bases: \(\) => \[\.\.\.Object\.keys\(PROVIDER_TEMPLATES\), "antigravity", "openai"\]/, "Sign in with ChatGPT is a Limits row");
+	assert.match(hostFn, /bases: \(\) => \[\.\.\.Object\.keys\(PROVIDER_TEMPLATES\), "antigravity"\]/, "the host lists templates and Antigravity");
+	assert.doesNotMatch(hostFn.slice(hostFn.indexOf("bases:"), hostFn.indexOf("stored:")), /"openai"/, "Sign in with ChatGPT has no Limits row (owner 2026-11-04)");
 	assert.doesNotMatch(src.slice(src.indexOf("const PROVIDER_TEMPLATES"), src.indexOf('"github-copilot": {')), /\bopenai: \{/, "routing unchanged: no openai sub template");
 	assert.match(src, /pi\.on\("turn_end", \(event\) => \{[\s\S]{0,250}hasNoUsageNumbers\(message\.provider\)[\s\S]{0,250}isUsageLimitReply\(message\.errorMessage[\s\S]{0,250}recordReplyLimited\(limitsFile\(\), message\.provider, limited\)/,
 		"replies on Sign in with ChatGPT set and clear its LIMITED mark");

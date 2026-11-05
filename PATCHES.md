@@ -330,6 +330,12 @@ left panel (a Limits box under History, with a refresh button).
   `note` (plain words, not a failure: `NO_USAGE_NOTES`); a reply whose error matches
   `subscription_sharing_*usage_limit_exceeded` marks it `limited` with `limitedAt`, the next good
   reply clears it (`recordReplyLimited`, from a `turn_end` hook); a check keeps the file's mark.
+  Since 2026-11-04 the live host no longer lists `openai` (owner: "can you remove the chatgpt one too
+  since i cant know the limit"; he signed in the Codex login, whose `ChatGPT (legacy)` row has real
+  numbers): `limitsHost().bases` drops it, so no `ChatGPT` row is shown, not even from old readings
+  (`listAccounts` skips a base the host doesn't list). Routing, the chain's GPT pool and the login are
+  unchanged; the note and LIMITED mark code stay for any host that lists it (`recordReplyLimited`
+  only updates an existing row, so it does nothing now). Undo: put `"openai"` back in `bases`.
   Undo: drop `"openai"` from `limitsHost().bases` (the row goes; the mark hook then never matches).
 - **Stored entry kinds** (`credentialFailure`): `oauth` is checked; only `api_key` says "signed in
   with an API key"; any other entry (no type, unknown type, or malformed like the `{result,next}`

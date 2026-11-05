@@ -1437,8 +1437,9 @@ function limitsHost(registry: () => ExtensionContext["modelRegistry"] | undefine
 	return {
 		configured: () => normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()))
 			.map((entry) => ({ provider: subProviderName(entry), label: entry.label })),
-		// "openai" = Sign in with ChatGPT: a Limits row only (not a numbered-sub template; routing unchanged).
-		bases: () => [...Object.keys(PROVIDER_TEMPLATES), "antigravity", "openai"],
+		// Sign in with ChatGPT ("openai") has no Limits row: it gives no numbers, and the owner asked to
+		// drop it (2026-11-04, "remove the chatgpt one too since i cant know the limit"). Routing unchanged.
+		bases: () => [...Object.keys(PROVIDER_TEMPLATES), "antigravity"],
 		stored: (provider) => readStoredCredential(provider) as LimitsCredential | undefined,
 		refresh: async (provider, force) => {
 			const reg = registry();
