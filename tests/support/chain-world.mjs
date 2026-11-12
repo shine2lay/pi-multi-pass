@@ -95,8 +95,9 @@ export const STALE_CTX = "This extension ctx is stale after session replacement 
  * sources: from loadSources(). quotaMembers: the members that get quota files (see writeQuota).
  * builtin: { provider: model ids } pi-ai's built-in catalog offers (getModels; other providers get none).
  * registered: [{ provider, id }] only pi's registry holds (an extension's provider); the registry lists
- * these after every built-in model. run(chat) gets notes, model, path, replays, selects (each
- * ctx.ui.select: { title, items }), command(name, args) and prompt(text), fail(error, id)
+ * these after every built-in model. run(chat) gets notes, model, path, replays, replayed (the replayed
+ * texts), selects (each ctx.ui.select: { title, items }), command(name, args) and prompt(text),
+ * customTurn(content) (a run an extension starts with a custom message), fail(error, id)
  * (turn_end + agent_end + agent_before_settle) and settle(id).
  */
 export async function chainWorld(options, run) {
@@ -150,6 +151,7 @@ async function openChat({ production, temp, creds, builtin, registered, start, r
 	let current = { ...start };
 	const path_ = [`${current.provider}/${current.id}`];
 	let replays = 0, stale = false, staleReads = 0;
+	const replayed = [];
 	const events = new Map(), notes = [], commands = new Map(), selects = [];
 	const modelRegistry = {
 		authStorage: { hasAuth: (p) => Boolean(creds[p]), get: (p) => creds[p] },
@@ -171,7 +173,7 @@ async function openChat({ production, temp, creds, builtin, registered, start, r
 	};
 	const pi = { on: (name, fn) => events.set(name, [...(events.get(name) ?? []), fn]),
 		registerCommand: (name, spec) => commands.set(name, spec), registerProvider() {}, registerTool() {},
-		sendUserMessage: () => { replays++; },
+		sendUserMessage: (text) => { replays++; replayed.push(text); },
 		setModel: async next => { const previousModel = current; current = { provider: next.provider, id: next.id };
 			path_.push(`${current.provider}/${current.id}`);
 			await emit("model_select", { model: current, previousModel, source: "set" }); return true; },
@@ -187,7 +189,13 @@ async function openChat({ production, temp, creds, builtin, registered, start, r
 		replace: async () => { await emit("session_shutdown", {}); stale = true; },
 		command: (name, args) => commands.get(name).handler(args, ctx),
 		get model() { return current; }, get path() { return path_; }, get replays() { return replays; },
-		prompt: async (text) => { await emit("input", { text, source: "rpc" }); await emit("before_agent_start", { prompt: text }); },
+		get replayed() { return [...replayed]; },
+		prompt: async (text) => { await emit("input", { text, source: "rpc" });
+			await emit("before_agent_start", { type: "before_agent_start", messageType: "user", prompt: text }); },
+		// pi 1.2.0+: a run an extension starts with pi.sendMessage(..., { triggerTurn: true }) fires
+		// before_agent_start with messageType "custom" and no prompt (no input event: nothing was typed).
+		customTurn: (message) => emit("before_agent_start", { type: "before_agent_start", messageType: "custom",
+			message: { role: "custom", customType: "test-extension", content: message, display: true, timestamp: Date.now() } }),
 		settle: (id) => emit("agent_before_settle", boundary(id)),
 		fail: async (error, id = `failed-${path_.length}-${notes.length}`) => {
 			const message = { role: "assistant", provider: current.provider, model: current.id, stopReason: "error", errorMessage: error };
