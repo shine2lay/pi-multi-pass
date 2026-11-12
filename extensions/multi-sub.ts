@@ -6434,8 +6434,12 @@ export default function multiSub(pi: ExtensionAPI) {
 	// Track last user prompt for retry on rotation
 	let lastUserPrompt: string | null = null;
 
-	// Listen for user input to track last prompt
+	// Listen for user input to track last prompt.
+	// pi 1.2.0+ also fires this for a run an add-on starts with pi.sendMessage(..., { triggerTurn: true })
+	// (messageType "custom", no prompt); pi 1.0.1 fired nothing for it. Such a run keeps the user's
+	// prompt and turn state, as on 1.0.1, so a replay after a pool switch is still the user's prompt.
 	pi.on("before_agent_start", async (event, ctx) => {
+		if ((event as { messageType?: string }).messageType === "custom") return;
 		refusalFallback.reset();
 		poolManager.signInContinuation.reset();
 		poolManager.returnContinuation.reset(); // mine/fallback-return
