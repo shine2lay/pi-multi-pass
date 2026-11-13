@@ -1,0 +1,374 @@
+{
+	"recordedAt": "2026-11-13T04:19:54.369Z",
+	"replies": {
+		"anthropic": {
+			"status": 200,
+			"body": {
+				"five_hour": null,
+				"seven_day": {
+					"utilization": 33,
+					"resets_at": "2026-11-16T05:00:00.262235+00:00",
+					"limit_dollars": null,
+					"used_dollars": null,
+					"remaining_dollars": null,
+					"locked_reason": null
+				},
+				"seven_day_oauth_apps": null,
+				"seven_day_opus": null,
+				"seven_day_sonnet": null,
+				"seven_day_cowork": null,
+				"seven_day_omelette": null,
+				"tangelo": null,
+				"iguana_necktie": null,
+				"omelette_promotional": null,
+				"nimbus_quill": null,
+				"cinder_cove": null,
+				"copper_kite": null,
+				"brass_thimble": null,
+				"harbor_lantern": null,
+				"wattle_ember": null,
+				"promo_credits": null,
+				"amber_ladder": null,
+				"granite_teacup": null,
+				"amber_cistern": null,
+				"amber_cistern_offer": null,
+				"juniper_tide": null,
+				"cedar_ember": null,
+				"starry_waterfall": null,
+				"amber_gauge": null,
+				"pace": null,
+				"indicator": null,
+				"extra_usage": {
+					"is_enabled": false,
+					"monthly_limit": null,
+					"used_credits": null,
+					"utilization": null,
+					"currency": null,
+					"decimal_places": null,
+					"disabled_reason": null,
+					"user_disabled": true,
+					"spend_limit_reached": false,
+					"credits_ever_enabled": true,
+					"daily": null,
+					"weekly": null
+				},
+				"limits": [
+					{
+						"kind": "weekly_all",
+						"group": "weekly",
+						"percent": 33,
+						"severity": "normal",
+						"resets_at": "2026-11-16T05:00:00.262235+00:00",
+						"scope": null,
+						"is_active": true
+					},
+					{
+						"kind": "weekly_scoped",
+						"group": "weekly",
+						"percent": 0,
+						"severity": "normal",
+						"resets_at": "2026-11-16T05:00:00+00:00",
+						"scope": {
+							"model": {
+								"id": null,
+								"display_name": "Fable"
+							},
+							"surface": null
+						},
+						"is_active": false
+					}
+				],
+				"spend": {
+					"used": {
+						"amount_minor": 0,
+						"currency": "USD",
+						"exponent": 2
+					},
+					"limit": null,
+					"percent": 0,
+					"severity": "normal",
+					"enabled": false,
+					"disabled_reason": null,
+					"cap": null,
+					"balance": null,
+					"auto_reload": null,
+					"disclaimer": "Usage credits cover you when you hit your plan limits. [Learn more](https://support.claude.com/articles/12429409)",
+					"can_purchase_credits": false,
+					"can_toggle": false
+				},
+				"member_dashboard_available": false,
+				"seven_day_breakdown": {
+					"as_of": "2026-11-13T04:19:53.283936+00:00",
+					"window_started_at": "2026-11-09T05:00:00.262235+00:00",
+					"rows": [
+						{
+							"key": "claude_code",
+							"display_name": "Claude Code",
+							"percent": 100
+						},
+						{
+							"key": "chat",
+							"display_name": "Chats",
+							"percent": 0
+						},
+						{
+							"key": "cowork",
+							"display_name": "Cowork",
+							"percent": 0
+						},
+						{
+							"key": "other",
+							"display_name": "Other",
+							"percent": 0
+						}
+					]
+				},
+				"weekly_scoped_shares": [
+					{
+						"limit_index": 1,
+						"used_percent_of_weekly": 0,
+						"allowance_percent_of_weekly": 50
+					}
+				]
+			}
+		},
+		"anthropic-2": {
+			"status": 200,
+			"body": {
+				"five_hour": null,
+				"seven_day": {
+					"utilization": 100,
+					"resets_at": "2026-11-14T14:00:00.426711+00:00",
+					"limit_dollars": null,
+					"used_dollars": null,
+					"remaining_dollars": null,
+					"locked_reason": null
+				},
+				"seven_day_oauth_apps": null,
+				"seven_day_opus": null,
+				"seven_day_sonnet": null,
+				"seven_day_cowork": null,
+				"seven_day_omelette": null,
+				"tangelo": null,
+				"iguana_necktie": null,
+				"omelette_promotional": null,
+				"nimbus_quill": null,
+				"cinder_cove": null,
+				"copper_kite": null,
+				"brass_thimble": null,
+				"harbor_lantern": null,
+				"wattle_ember": null,
+				"promo_credits": null,
+				"amber_ladder": null,
+				"granite_teacup": null,
+				"amber_cistern": null,
+				"amber_cistern_offer": null,
+				"juniper_tide": null,
+				"cedar_ember": null,
+				"starry_waterfall": null,
+				"amber_gauge": null,
+				"pace": null,
+				"indicator": null,
+				"extra_usage": {
+					"is_enabled": false,
+					"monthly_limit": null,
+					"used_credits": null,
+					"utilization": null,
+					"currency": null,
+					"decimal_places": null,
+					"disabled_reason": null,
+					"user_disabled": false,
+					"spend_limit_reached": false,
+					"credits_ever_enabled": false,
+					"daily": null,
+					"weekly": null
+				},
+				"limits": [
+					{
+						"kind": "weekly_all",
+						"group": "weekly",
+						"percent": 100,
+						"severity": "critical",
+						"resets_at": "2026-11-14T14:00:00.426711+00:00",
+						"scope": null,
+						"is_active": true
+					},
+					{
+						"kind": "weekly_scoped",
+						"group": "weekly",
+						"percent": 0,
+						"severity": "normal",
+						"resets_at": "2026-11-14T14:00:00+00:00",
+						"scope": {
+							"model": {
+								"id": null,
+								"display_name": "Fable"
+							},
+							"surface": null
+						},
+						"is_active": false
+					}
+				],
+				"spend": {
+					"used": {
+						"amount_minor": 0,
+						"currency": "USD",
+						"exponent": 2
+					},
+					"limit": null,
+					"percent": 0,
+					"severity": "normal",
+					"enabled": false,
+					"disabled_reason": null,
+					"cap": null,
+					"balance": null,
+					"auto_reload": null,
+					"disclaimer": "Usage credits cover you when you hit your plan limits. [Learn more](https://support.claude.com/articles/12429409)",
+					"can_purchase_credits": false,
+					"can_toggle": false
+				},
+				"member_dashboard_available": false,
+				"seven_day_breakdown": {
+					"as_of": "2026-11-13T04:19:53.441533+00:00",
+					"window_started_at": "2026-11-07T14:00:00.426711+00:00",
+					"rows": [
+						{
+							"key": "claude_code",
+							"display_name": "Claude Code",
+							"percent": 100
+						},
+						{
+							"key": "chat",
+							"display_name": "Chats",
+							"percent": 0
+						},
+						{
+							"key": "cowork",
+							"display_name": "Cowork",
+							"percent": 0
+						},
+						{
+							"key": "other",
+							"display_name": "Other",
+							"percent": 0
+						}
+					]
+				},
+				"weekly_scoped_shares": [
+					{
+						"limit_index": 1,
+						"used_percent_of_weekly": 0,
+						"allowance_percent_of_weekly": 50
+					}
+				]
+			}
+		},
+		"openai-codex": {
+			"status": 200,
+			"body": {
+				"user_id": "<hidden>",
+				"account_id": "<hidden>",
+				"email": "<hidden>",
+				"plan_type": "prolite",
+				"rate_limit": {
+					"allowed": true,
+					"limit_reached": false,
+					"primary_window": {
+						"used_percent": 17,
+						"limit_window_seconds": 604800,
+						"reset_after_seconds": 406951,
+						"reset_at": 1794950544
+					},
+					"secondary_window": null
+				},
+				"code_review_rate_limit": null,
+				"additional_rate_limits": null,
+				"model_usage": {
+					"gpt-6-astra": {
+						"available": true,
+						"available_at": null,
+						"credits_would_enable": false
+					}
+				},
+				"credits": {
+					"has_credits": false,
+					"unlimited": false,
+					"overage_limit_reached": false,
+					"balance": "0",
+					"approx_local_messages": [
+						0,
+						0
+					],
+					"approx_cloud_messages": [
+						0,
+						0
+					]
+				},
+				"spend_control": {
+					"reached": false,
+					"individual_limit": null
+				},
+				"rate_limit_reached_type": null,
+				"promo": null,
+				"rate_limit_reset_credits": {
+					"available_count": 2,
+					"applicable_available_count": 0
+				}
+			}
+		},
+		"antigravity": {
+			"status": 200,
+			"body": {
+				"groups": [
+					{
+						"buckets": [
+							{
+								"bucketId": "gemini-weekly",
+								"displayName": "Weekly Limit Remaining",
+								"window": "weekly",
+								"resetTime": "2026-11-13T23:50:26Z",
+								"description": "You have hit your weekly limit, it refreshes in 19 hours, 30 minutes. If on a supported paid plan, you can use AI credits in the interim or upgrade to a higher tier.",
+								"remainingFraction": 0
+							},
+							{
+								"bucketId": "gemini-5h",
+								"displayName": "Five Hour Limit Remaining",
+								"window": "5h",
+								"resetTime": "2026-11-13T07:28:18Z",
+								"description": "You have hit your weekly limit, the 5-hour limit does not currently apply. Your weekly limit will fully refresh in 19 hours, 30 minutes.",
+								"disabled": true,
+								"remainingFraction": 1
+							}
+						],
+						"displayName": "Gemini Models",
+						"description": "Models within this group: Gemini Flash, Gemini Pro"
+					},
+					{
+						"buckets": [
+							{
+								"bucketId": "3p-weekly",
+								"displayName": "Weekly Limit Remaining",
+								"window": "weekly",
+								"resetTime": "2026-11-18T15:31:47Z",
+								"description": "You have hit your weekly limit, it refreshes in 5 days, 11 hours. If on a supported paid plan, you can use AI credits in the interim or upgrade to a higher tier.",
+								"remainingFraction": 0
+							},
+							{
+								"bucketId": "3p-5h",
+								"displayName": "Five Hour Limit Remaining",
+								"window": "5h",
+								"resetTime": "2026-11-13T05:00:43Z",
+								"description": "You have hit your weekly limit, the 5-hour limit does not currently apply. Your weekly limit will fully refresh in 5 days, 11 hours.",
+								"disabled": true,
+								"remainingFraction": 1
+							}
+						],
+						"displayName": "Claude and GPT models",
+						"description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS"
+					}
+				],
+				"description": "Within each group, models share a weekly limit and a 5-hour limit. Quota is consumed proportionally to the cost of the tokens. Thus, limits will last longer with shorter tasks or using more cost-effective models. The 5-hour limit smooths out aggregate demand to fairly distribute global capacity across all users, while your weekly limit is tied directly to your individual tier."
+			}
+		}
+	}
+}
