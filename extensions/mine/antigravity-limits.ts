@@ -21,11 +21,28 @@ const reset = (v: unknown): string | undefined => {
 	return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : undefined;
 };
 
+/** Stable key of a usage-summary bucket, from the provider's own bucket id and window, never its label:
+ * `gemini-weekly` → `ag:gemini:7d`, `3p-5h` → `ag:claude-gpt:5h` (model routing reads these; plan
+ * d_udizqai7oz S2). Undefined when the family or the window is unknown: the caller keeps the position.
+ */
+export function antigravityBucketKey(bucket: { bucketId?: unknown; window?: unknown }): string | undefined {
+	const id = typeof bucket.bucketId === "string" ? bucket.bucketId.toLowerCase() : "";
+	const family = /^gemini(-|$)/.test(id) ? "gemini" : /^3p(-|$)/.test(id) ? "claude-gpt" : undefined;
+	const span = typeof bucket.window === "string" ? bucket.window.toLowerCase() : id.split("-").at(-1) ?? "";
+	const window = /^(5h|five_hour)$/.test(span) ? "5h" : /^(weekly|week|7d)$/.test(span) ? "7d" : undefined;
+	return family && window ? `ag:${family}:${window}` : undefined;
+}
+
 /** Public usage response groups[].buckets[], or catalog models[*].quotaInfo as fallback.
  * Only finite fractions count; a bucket id without a number is not evidence of exhaustion.
  */
 export function antigravityModelLimits(data: unknown, catalog = false): ModelLimitsData {
-	const raw = object(data), windows: LimitWindow[] = [];
+	return summarize(data, catalog).limits;
+}
+
+/** The limits plus each window's stable key (`ag:<i>` by position when unknown or repeated). */
+function summarize(data: unknown, catalog: boolean): { limits: ModelLimitsData; keys: string[] } {
+	const raw = object(data), windows: LimitWindow[] = [], stable: (string | undefined)[] = [];
 	let unknown = 0;
 	if (!catalog) {
 		for (const [g, value] of (Array.isArray(raw?.groups) ? raw.groups : []).entries()) {
@@ -33,6 +50,8 @@ export function antigravityModelLimits(data: unknown, catalog = false): ModelLim
 			for (const [b, item] of (Array.isArray(group?.buckets) ? group.buckets : []).entries()) {
 				const bucket = object(item);
 				if (!fraction(bucket?.remainingFraction)) { unknown++; continue; }
+				const key = antigravityBucketKey(bucket ?? {});
+				stable.push(key && !stable.includes(key) ? key : undefined);
 				windows.push({ name: `Shared ${name(group?.displayName, `group ${g + 1}`)} / ${name(bucket?.displayName ?? bucket?.window ?? bucket?.bucketId, `bucket ${b + 1}`)}`,
 					remainingPercent: bucket.remainingFraction * 100, usedPercent: (1 - bucket.remainingFraction) * 100,
 					resetAt: reset(bucket.resetTime) });
@@ -49,7 +68,7 @@ export function antigravityModelLimits(data: unknown, catalog = false): ModelLim
 				resetAt: reset(quota.resetTime) });
 		}
 	}
-	return {
+	const limits: ModelLimitsData = {
 		status: windows.length ? "available" : "unavailable", scope: "provider-model-buckets",
 		source: `Antigravity ${catalog ? "fetchAvailableModels" : "retrieveUserQuotaSummary"}`,
 		windows: windows.slice(0, 20), omittedWindows: Math.max(0, windows.length - 20),
@@ -57,6 +76,7 @@ export function antigravityModelLimits(data: unknown, catalog = false): ModelLim
 			+ "Group-to-model mapping and account-wide exhaustion are unknown."
 			+ (unknown ? ` ${unknown} bucket(s) have unknown usage.` : ""),
 	};
+	return { limits, keys: limits.windows.map((_, i) => stable[i] ?? `ag:${i}`) };
 }
 
 function endpoints(env: Record<string, string | undefined>): string[] {
@@ -102,13 +122,13 @@ export async function checkAntigravityLimits(
 						if (response.status === 401 || response.status === 429) return failure(last);
 						continue; // aggregate summary may be unavailable on free tier; try model buckets
 					}
-					const limits = antigravityModelLimits(await response.json(), catalog);
+					const { limits, keys } = summarize(await response.json(), catalog);
 					if (limits.status !== "available") { last = "Antigravity quota unavailable (no known usage in reply)."; continue; }
 					// No global limited verdict: an empty shared bucket need not limit the selected model.
 					return { kind: "available" as const, summary: limits.note!, details: [limits.note!], score: 0, limits,
 						// Preserve shared scope in the Limits box too: its generic converter assumes
 						// any full window limits the entire account, which these buckets cannot prove.
-						usageWindows: limits.windows.map((w, i) => ({ key: `ag:${i}`, label: w.name.slice(0, 60),
+						usageWindows: limits.windows.map((w, i) => ({ key: keys[i], label: w.name.slice(0, 60),
 							usedPercent: w.usedPercent, resetAt: w.resetAt ? Date.parse(w.resetAt) / 1000 : undefined })),
 					};
 				} catch {

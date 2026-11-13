@@ -2,20 +2,20 @@
 // Recorded 2026-11-13 04:19Z from the four free usage pages /subs limit-check reads (ids and emails hidden):
 // Claude 1 (33% weekly, Fable sub-cap 0%), Claude 2 (100%, limited), ChatGPT legacy (17%), Antigravity's two
 // groups × weekly/5-hour. Fake fetch only: the real one throws. The seam test reads the result with pi-queue's
-// own reader (`readingsFromLimits`, model-readings.ts; PI_QUEUE_DIR, default ~/projects/pi-queue), so there is
+// own reader (`readingsFromLimits`, model-readings.ts; PI_QUEUE_DIR, default the sibling checkout ../pi-queue), so there is
 // one parser on each side of the file and this proves they agree.
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as subs from "../extensions/mine/subs-limits.ts";
 import * as ag from "../extensions/mine/antigravity-limits.ts";
 import * as port from "../extensions/mine/limits-port.ts";
 
 globalThis.fetch = async () => { throw new Error("network forbidden in tests"); };
 const recorded = JSON.parse(readFileSync(new URL("./support/subs-replies-2026-11-13.json", import.meta.url), "utf8")).replies;
-const queueDir = process.env.PI_QUEUE_DIR ?? join(homedir(), "projects/pi-queue");
+const queueDir = process.env.PI_QUEUE_DIR ?? fileURLToPath(new URL("../../pi-queue/", import.meta.url));
 const routing = await import(pathToFileURL(join(queueDir, "model-readings.ts")).href);
 
 const MIN = 60_000;

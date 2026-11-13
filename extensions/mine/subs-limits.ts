@@ -26,6 +26,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { formatResetIn } from "./reset-countdown.ts";
+import { freshReadings, type LimitsApiV1, type LimitsChannelV1, type LimitsEvent } from "./limits-port.ts";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -804,28 +805,8 @@ export function writeLimitsReadings(file: string, readings: LimitsReadings): voi
 // Sharing: one channel per process (every chat, and pi-web-ui's server)
 // ==========================================================================
 
-export interface LimitsEvent {
-	checking: boolean;
-	readings?: LimitsReadings;
-}
-
-/** Contract v1, shared with pi-web-ui (server/subs-limits.ts). Either side may create it. */
-export interface LimitsApiV1 {
-	/** Check every account (joins a check already running); resolves with the readings after it. */
-	check(): Promise<LimitsReadings>;
-	/** The shared file's readings; undefined before the first check. */
-	readings(): LimitsReadings | undefined;
-	checking(): boolean;
-	file: string;
-}
-
-export interface LimitsChannelV1 {
-	v: 1;
-	/** Called on every change: a check starting or ending, and every write. */
-	listeners: Set<(event: LimitsEvent) => void>;
-	/** Set by pi-multi-pass (the latest loaded copy). */
-	api?: LimitsApiV1;
-}
+/** The channel's v1 contract and the reading port model routing uses (`api.fresh`) live in limits-port.ts. */
+export type { LimitsApiV1, LimitsChannelV1, LimitsEvent } from "./limits-port.ts";
 
 export const LIMITS_CHANNEL_KEY = Symbol.for("pi-multi-pass.limits");
 const STATE_KEY = Symbol.for("pi-multi-pass.limits.state.v1");
@@ -1001,6 +982,7 @@ export function installLimitsApi(options: CheckOptions): LimitsApiV1 {
 		},
 		readings: () => readLimitsReadings(options.file),
 		checking: limitsChecking,
+		fresh: (fresh) => freshReadings(api, { now: options.now, ...fresh }),
 	};
 	limitsChannel().api = api;
 	return api;

@@ -564,7 +564,10 @@ and shows them in the `multi-pass-subs` box:
 - **One set of numbers:** readings go to `~/.pi/agent/multi-pass-quota/subs-limits.json`, written
   whole. Numbers seen in normal replies update their account's row for free. `--probe` is gone.
 - **pi-web-ui's Limits box** uses the same check through a versioned channel on `globalThis`
-  (`Symbol.for("pi-multi-pass.limits")`, contract v1 in `extensions/mine/subs-limits.ts`).
+  (`Symbol.for("pi-multi-pass.limits")`, contract v1 in `extensions/mine/limits-port.ts`).
+- **Model routing** reads the same numbers through `api.fresh()`: each account's age, re-checked
+  first when older than 30 min (waits at most 10 s); a failed check keeps the old numbers, marked
+  stale. Antigravity's windows carry stable keys (`ag:gemini:7d`, `ag:claude-gpt:5h`, ...).
 
 ## Fork: externally owned Antigravity account
 
