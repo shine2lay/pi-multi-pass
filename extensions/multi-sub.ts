@@ -75,6 +75,8 @@ import {
 } from "@earendil-works/pi-tui";
 // mine/fallback-return: chats on the fallback pool go back to the primary pool (PATCHES.md)
 import { fallbackRoleLine, loopBackLine, refusalReturns, ReturnContinuation, ReturnGuard, returnCandidates } from "./mine/fallback-return.ts";
+// mine/row-failover: a chat of a department with a model table moves along its tier row (PATCHES.md)
+import { planRowFailover, rowChannel, type RowChoice, type RowPlan } from "./mine/row-failover.ts";
 // mine/antigravity-chain-entries: a pool's models include those pi's registry holds (PATCHES.md)
 import { PoolModelCatalog, type RegisteredModelSource } from "./mine/pool-models.ts";
 // mine/model-fallback: model-scoped exhaustion for same-pool chain entries (PATCHES.md)
@@ -2561,6 +2563,27 @@ class PoolManager {
 	readonly signInContinuation = new SignInContinuation();
 	signInLabel(provider: string): string | undefined { return this.signIn.label(provider); }
 	private limitsGeneration = 0;
+	// mine/row-failover: the row cells that failed in this turn (keyed by the turn's cascade).
+	private rowTried = new WeakMap<FailoverCascadeState, RowChoice[]>();
+
+	/** mine/row-failover: the chat's row from pi-queue's router; undefined keeps the global chain. */
+	private planRow(ctx: ExtensionContext, currentModel: Model<Api>, cascade: FailoverCascadeState): RowPlan | undefined {
+		const channel = rowChannel();
+		const session = channel ? ctx.sessionManager : undefined;
+		if (!channel || !session) return undefined;
+		const failed: RowChoice = { model: `${currentModel.provider}/${currentModel.id}`, thinking: this.pi.getThinkingLevel?.() };
+		const tried = this.rowTried.get(cascade) ?? [];
+		this.rowTried.set(cascade, [...tried, failed]);
+		const host = this.quotaRoutingHost(ctx);
+		try {
+			return planRowFailover({ channel, session, failed, tried, pools: loadEffectiveConfig(ctx.cwd).pools,
+				eligible: (pool, member, modelId) => !wasTargetAttempted(cascade.attemptedProviders, pool.name, member, modelId)
+					&& host.eligible(pool as PoolConfig, member, modelId) });
+		} catch (error) {
+			this.recordTrace(`row failover unavailable (${(error as Error).message}); global chain`);
+			return undefined;
+		}
+	}
 
 	constructor(pi: ExtensionAPI) {
 		this.pi = pi;
@@ -3408,10 +3431,22 @@ class PoolManager {
 			},
 		);
 
+		// mine/row-failover: the chat's other accounts of this model first, then its department's row
+		// (not the global chain, no step up).
+		const row = this.planRow(ctx, currentModel, cascade);
+		if (row) {
+			plan.candidates = [...plan.candidates.filter((c) => c.source === "pool"), ...row.candidates];
+			plan.skips = plan.skips.filter((skip) => skip.type === "pool-member" && !skip.chainName);
+			plan.chain = undefined;
+			plan.currentChainIndex = undefined;
+			for (const cell of row.passed) this.recordTrace(`row cell ${cell} skipped (no eligible account)`);
+			if (row.problems.length) this.recordTrace(`row table problems: ${row.problems.join("; ")}`);
+		}
+
 		// mine/fallback-return: a refusal on the fallback pool goes back up to the primary pool first,
 		// once per turn; members that refused in this turn are attempted/exhausted and not offered.
 		let steppedUp = false;
-		if (!signIn && this.returnGuard.allow(cascade)) {
+		if (!row && !signIn && this.returnGuard.allow(cascade)) {
 			const up = returnCandidates(config, currentModel.provider, this.quotaRoutingHost(ctx).eligible,
 				cascade.attemptedProviders, "refusal");
 			if (up.length) { plan.candidates.unshift(...up); steppedUp = true; }
@@ -3439,8 +3474,9 @@ class PoolManager {
 			this.recordTrace(skip.detail);
 		}
 
-		const nextCandidate = plan.candidates[0];
+		const nextCandidate: FailoverCandidate | undefined = plan.candidates[0];
 		if (!nextCandidate) {
+			if (row && row.result.action !== "pick") ctx.ui.notify(row.result.line, "warning"); // mine/row-failover
 			this.exhaustedReported = true; // mine/loop-back: one plain notice
 			ctx.ui.notify(formatFailoverExhausted(pool.name, currentModel.provider), "warning");
 			ctx.ui.setStatus("multi-pass", formatFailoverStatus(null, pool.name));
@@ -3468,6 +3504,8 @@ class PoolManager {
 			this.recordTrace(`${nextCandidate.provider} skipped because effective project access changed during selection`);
 			return false;
 		}
+		// mine/row-failover: tell pi-queue's lead routing this switch is routing, not a hand pick.
+		if (nextCandidate.thinking) rowChannel()?.routedSwitch?.(ctx.sessionManager.getSessionId(), `${nextModel.provider}/${nextModel.id}`);
 		const success = await this.resetFirst.switchModel(nextModel, () => this.pi.setModel(nextModel));
 		if (!success) {
 			ctx.ui.notify(
@@ -3482,8 +3520,13 @@ class PoolManager {
 		}
 
 		cascade.attemptedProviders.add(nextCandidate.provider);
-		if (typeof nextCandidate.chainIndex === "number") {
+		if (typeof nextCandidate.chainIndex === "number" && !nextCandidate.thinking) {
 			cascade.visitedChainIndexes.add(nextCandidate.chainIndex);
+		}
+		if (row && nextCandidate.thinking) { // mine/row-failover: the cell's thinking, its decision logged and shown
+			this.pi.setThinkingLevel?.(nextCandidate.thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
+			try { rowChannel()?.logFailover?.(row.result); } catch (error) { this.recordTrace(`row decision not logged (${(error as Error).message})`); }
+			ctx.ui.notify(row.result.line, "info");
 		}
 
 		ctx.ui.notify(
@@ -5139,6 +5182,8 @@ interface FailoverCandidate {
 	source: "pool" | "chain";
 	chainName?: string;
 	chainIndex?: number;
+	/** mine/row-failover: a row cell's thinking level (set only on row candidates). */
+	thinking?: string;
 }
 
 interface FailoverSkip {

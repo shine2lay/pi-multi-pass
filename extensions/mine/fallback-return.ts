@@ -17,6 +17,8 @@
 import { MAX_CONTINUES_PER_PROMPT, type ContinueBoundary, type ContinueMessage, type ContinueModel,
 	type ContinueResult } from "./signin-failover.ts";
 import { isFreshInput } from "./fresh-input.ts";
+// mine/row-failover's names travel with this module into the checks that load multi-sub.ts in a vm context.
+export { planRowFailover, rowChannel } from "./row-failover.ts";
 
 export interface ReturnPool { name: string; members: string[]; enabled: boolean; fallback?: boolean; returnOnRefusal?: boolean }
 export interface ReturnChainEntry { pool: string; model: string; enabled?: boolean }

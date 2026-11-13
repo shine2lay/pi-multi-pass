@@ -102,7 +102,8 @@ export const STALE_CTX = "This extension ctx is stale after session replacement 
  */
 export async function chainWorld(options, run) {
 	assert.ok(options?.start?.provider && options.start.id, "chainWorld needs start");
-	return chainFolder(options, async (folder) => run(await folder.open({ start: options.start })));
+	return chainFolder(options, async (folder) => run(await folder.open({ start: options.start, session: options.session,
+		thinking: options.thinking })));
 }
 
 /**
@@ -111,7 +112,9 @@ export async function chainWorld(options, run) {
  * open({ start, registered?, registry? }) -> a chat as chainWorld's plus replace() (session_shutdown,
  * then its ctx is stale: every read throws STALE_CTX, as pi's does) and staleReads (reads after that);
  * registered overrides the folder's registry-only models for that chat; registry "no-getAll" gives the
- * chat a registry without getAll (an older pi). folder.warnings: console.warn lines of the loaded copy.
+ * chat a registry without getAll (an older pi). session: the chat's ctx.sessionManager (none by default);
+ * thinking: its thinking level (pi.getThinkingLevel / setThinkingLevel; chat.thinking reads it).
+ * folder.warnings: console.warn lines of the loaded copy.
  */
 export async function chainFolder({ sources, config, quotaMembers, builtin, registered = [], room, resetDays }, run) {
 	assert.ok(sources?.sourceCode && sources?.returnMod, "chainWorld needs sources from loadSources()");
@@ -143,7 +146,7 @@ export async function chainFolder({ sources, config, quotaMembers, builtin, regi
 	} finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }
 
-async function openChat({ production, temp, creds, builtin, registered, start, registry = "full" }) {
+async function openChat({ production, temp, creds, builtin, registered, start, registry = "full", session, thinking = "medium" }) {
 	assert.ok(start?.provider && start?.id && Array.isArray(registered), "open needs start and a registered list");
 	assert.ok(registry === "full" || registry === "no-getAll", `registry must be "full" or "no-getAll", got ${registry}`);
 	const registryModels = [...Object.entries(builtin).flatMap(([provider, ids]) => ids.map((id) => ({ provider, id }))),
@@ -160,6 +163,7 @@ async function openChat({ production, temp, creds, builtin, registered, start, r
 	};
 	// pi's ctx after its session is replaced: every property read throws.
 	const ctx = new Proxy({ cwd: temp, get model() { return current; }, isIdle: () => true, hasUI: true, modelRegistry,
+		...(session ? { sessionManager: session } : {}),
 		ui: { notify: text => notes.push(text), setStatus() {},
 			select: async (title, items) => { selects.push({ title, items: [...items] }); return undefined; } },
 	}, { get(target, key, receiver) {
@@ -173,6 +177,7 @@ async function openChat({ production, temp, creds, builtin, registered, start, r
 	};
 	const pi = { on: (name, fn) => events.set(name, [...(events.get(name) ?? []), fn]),
 		registerCommand: (name, spec) => commands.set(name, spec), registerProvider() {}, registerTool() {},
+		getThinkingLevel: () => thinking, setThinkingLevel: (level) => { thinking = level; },
 		sendUserMessage: (text) => { replays++; replayed.push(text); },
 		setModel: async next => { const previousModel = current; current = { provider: next.provider, id: next.id };
 			path_.push(`${current.provider}/${current.id}`);
@@ -189,6 +194,7 @@ async function openChat({ production, temp, creds, builtin, registered, start, r
 		replace: async () => { await emit("session_shutdown", {}); stale = true; },
 		command: (name, args) => commands.get(name).handler(args, ctx),
 		get model() { return current; }, get path() { return path_; }, get replays() { return replays; },
+		get thinking() { return thinking; },
 		get replayed() { return [...replayed]; },
 		prompt: async (text) => { await emit("input", { text, source: "rpc" });
 			await emit("before_agent_start", { type: "before_agent_start", messageType: "user", prompt: text }); },
