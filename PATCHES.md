@@ -851,3 +851,14 @@ no table / no role / no session / no channel / router throws → Sol (global cha
 no move, one notice. `ROW_FAILOVER_SOURCE_REF=db3e721` (before): a, c, d, g fail.
 **Compat/undo:** inert without pi-queue's channel (≥ its S5 commit). Revert this commit, reinstall
 (`pi update --extension git:github.com/shine2lay/pi-multi-pass@mine`), `pi-web-deploy restart`.
+
+### qa-testing-page  ·  status: local (never upstream)
+**Why:** the owner's testing standard (QA #156, 2026-11-14): every repo carries one testing page that
+QA's `test-check` reads. QA owns the page, the quarantine list and the miss log; Ops keeps the page's
+"What runs when" table true when the land check (`scripts/test.sh`) changes.
+**Behavior:** none. Four new files, no code: `docs/testing.md`, `docs/testing-quarantine.md`,
+`docs/testing-misses.jsonl`, `found-below-par.md`.
+**Hook points:** none (no upstream file touched, so a sync can't conflict on it).
+**Test:** `test-check .` from agent-tools: level 2, the level a tool needs. No `tests/*-check.mjs`:
+there is no behavior to lose.
+**Compat/undo:** revert the commit; nothing to reinstall.
