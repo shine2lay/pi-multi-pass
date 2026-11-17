@@ -6,7 +6,7 @@
 // Plain node; no network (fetch throws), fake credentials only, no model calls.
 // ROW_FAILOVER_SOURCE_REF=<ref> loads that ref's multi-sub.ts (db3e721: a, c, d, g fail: global chain).
 import assert from "node:assert/strict";
-import { blockNetwork, chainWorld, loadSources } from "./support/chain-world.mjs";
+import { blockNetwork, chainWorld, continued, loadSources } from "./support/chain-world.mjs";
 
 const sources = await loadSources(process.env.ROW_FAILOVER_SOURCE_REF);
 const KEY = Symbol.for("pi-queue.model-route");
@@ -18,13 +18,14 @@ const MEMBERS = ["anthropic", "anthropic-2"];
 
 const network = blockNetwork("row-failover checks");
 
-/** The live pools and chain (Argon disabled, Ops lead 2026-11-12). */
-const config = ({ antigravity = true } = {}) => ({
+/** The live pools and chain (Argon disabled, Ops lead 2026-11-12). gpt: the GPT pool's provider (live: "openai",
+ * Sign in with ChatGPT; pi-queue's GPT column still launches task chats on "openai-codex"). */
+const config = ({ antigravity = true, gpt = "openai-codex" } = {}) => ({
 	subscriptions: [], presets: [],
 	pools: [
 		{ name: "claude-real", baseProvider: "anthropic", members: MEMBERS, enabled: true,
 			quotaRouting: { policy: "weekly-first", recovery: "off", minWeeklyResetAdvantageMinutes: 0, maxObservationAgeMinutes: 1440 } },
-		{ name: "chatgpt-fallback", baseProvider: "openai-codex", members: ["openai-codex"], enabled: true, fallback: false, returnOnRefusal: true },
+		{ name: "chatgpt-fallback", baseProvider: gpt, members: [gpt], enabled: true, fallback: false, returnOnRefusal: true },
 		{ name: "antigravity-fallback", baseProvider: "antigravity", members: ["antigravity"], enabled: antigravity, fallback: false,
 			returnOnRefusal: true },
 	],
@@ -41,6 +42,8 @@ const ROW = [
 	{ column: "antigravity", model: `antigravity/${CARBON}`, thinking: "high" },
 	{ column: "openai", model: `openai-codex/${ASTRA}`, thinking: "medium" },
 ];
+/** The Codex weekly-limit text, exactly as Ops #983/#988 got it (2026-11-17 18:16Z); no HTTP status. */
+const CODEX_LIMIT = "Codex error: The usage limit has been reached";
 const columnOf = (provider) => {
 	const base = provider.replace(/-\d+$/, "");
 	return base === "openai" || base === "openai-codex" ? "openai" : ["anthropic", "antigravity"].includes(base) ? base : undefined;
@@ -73,8 +76,8 @@ function fakeRouter({ throws = false } = {}) {
 }
 
 const session = (extra = {}) => ({ getSessionId: () => "chat-1", getSessionFile: () => "/tmp/chat-1.jsonl", getBranch: () => [], ...extra });
-const world = ({ antigravity, ...opts }, run) => chainWorld({ sources, config: config({ antigravity }), quotaMembers: MEMBERS,
-	builtin: { anthropic: [CLAUDE], "openai-codex": [SOL, ASTRA] }, registered: [{ provider: "antigravity", id: CARBON },
+const world = ({ antigravity, gpt, ...opts }, run) => chainWorld({ sources, config: config({ antigravity, gpt }), quotaMembers: MEMBERS,
+	builtin: { anthropic: [CLAUDE], "openai-codex": [SOL, ASTRA], openai: [SOL, ASTRA] }, registered: [{ provider: "antigravity", id: CARBON },
 		{ provider: "antigravity", id: CLAUDE }], thinking: "xhigh", ...opts }, run);
 const at = (c) => `${c.model.provider}/${c.model.id}@${c.thinking}`;
 const CLAUDE_START = { provider: "anthropic", id: CLAUDE };
@@ -152,6 +155,30 @@ const cases = [
 			assert.equal(at(c), `anthropic/${CLAUDE}@xhigh`, `path ${c.path.join(" -> ")}`);
 			assert.ok(c.notes.some((n) => n.includes("every cell limited")), c.notes.join(" | "));
 			assert.equal(c.notes.filter((n) => n.includes("Failover exhausted")).length, 1, c.notes.join(" | "));
+		});
+	}],
+	["h a task forced onto openai-codex Astra (no pool holds openai-codex; live GPT pool is openai) hits the Codex limit -> the row's next cell (Claude @ high), logged, turn continues", async () => {
+		const log = fakeRouter();
+		await world({ gpt: "openai", room: MEMBERS, start: { provider: "openai-codex", id: ASTRA }, thinking: "medium",
+			session: session({ role: "ops" }) }, async (c) => {
+			await c.prompt("offline synthetic request");
+			const settled = await c.fail(CODEX_LIMIT, "astra");
+			assert.match(at(c), new RegExp(`^anthropic(-2)?/${CLAUDE}@high$`), `path ${c.path.join(" -> ")}`);
+			assert.deepEqual(JSON.parse(JSON.stringify(log.asks[0])), { failed: { model: `openai-codex/${ASTRA}`, thinking: "medium" }, tried: [] });
+			assert.deepEqual(log.logged, [`anthropic/${CLAUDE}`], "one failover decision logged");
+			continued(settled, "astra");
+			assert.equal(c.replays, 0, "no prompt replay");
+		});
+	}],
+	["i a chat of no role on a provider no pool holds -> no move, as before (no row, no column pool)", async () => {
+		const log = fakeRouter();
+		await world({ gpt: "openai", room: MEMBERS, start: { provider: "openai-codex", id: ASTRA }, thinking: "medium",
+			session: session() }, async (c) => {
+			await c.prompt("offline synthetic request");
+			await c.fail(CODEX_LIMIT, "astra");
+			assert.equal(at(c), `openai-codex/${ASTRA}@medium`, `path ${c.path.join(" -> ")}`);
+			assert.deepEqual(log.logged, []);
+			assert.equal(c.notes.filter((n) => n.includes("Failover exhausted")).length, 0, c.notes.join(" | "));
 		});
 	}],
 ];
