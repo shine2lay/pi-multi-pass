@@ -57,6 +57,16 @@ export function rowChannel(): RowChannel | undefined {
 	return typeof api?.chatFailover === "function" && typeof api.columnOf === "function" ? (api as RowChannel) : undefined;
 }
 
+/**
+ * The enabled pool of a provider's row column, for a chat on a provider no pool holds: pi-queue launches GPT-column
+ * tasks on "openai-codex" while the live GPT pool holds "openai" (Ops #995). Used only when the chat's row answers.
+ * No channel (an older pi-queue): undefined.
+ */
+export function columnPool<P extends RowPool>(channel: RowChannel | undefined, provider: string, pools: readonly P[]): P | undefined {
+	const column = channel?.columnOf(provider);
+	return channel && column ? pools.find((p) => p.enabled && channel.columnOf(p.baseProvider ?? p.members[0] ?? "") === column) : undefined;
+}
+
 /** "anthropic-2" → pinned to that account; "anthropic" → any account of the column. */
 const pinned = (provider: string) => /-\d+$/.test(provider);
 

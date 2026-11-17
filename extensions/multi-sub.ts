@@ -76,7 +76,7 @@ import {
 // mine/fallback-return: chats on the fallback pool go back to the primary pool (PATCHES.md)
 import { fallbackRoleLine, loopBackLine, refusalReturns, ReturnContinuation, ReturnGuard, returnCandidates } from "./mine/fallback-return.ts";
 // mine/row-failover: a chat of a department with a model table moves along its tier row (PATCHES.md)
-import { planRowFailover, rowChannel, type RowChoice, type RowPlan } from "./mine/row-failover.ts";
+import { columnPool, planRowFailover, rowChannel, type RowChoice, type RowPlan } from "./mine/row-failover.ts";
 // mine/antigravity-chain-entries: a pool's models include those pi's registry holds (PATCHES.md)
 import { PoolModelCatalog, type RegisteredModelSource } from "./mine/pool-models.ts";
 // mine/model-fallback: model-scoped exhaustion for same-pool chain entries (PATCHES.md)
@@ -3392,7 +3392,7 @@ class PoolManager {
 		const signIn = parseSignInFailure(errorMessage);
 		if (signIn ? signIn.provider !== currentModel.provider : !isRateLimitError(errorMessage)) return false;
 
-		const pool = this.getPoolForProvider(currentModel.provider);
+		const owned = this.getPoolForProvider(currentModel.provider), pool = owned ?? columnPool(rowChannel(), currentModel.provider, this.getPoolConfigs());
 		if (!pool) return false;
 
 		this.recordTrace(`${currentModel.provider} failed with ${summarizeTraceError(errorMessage)}`);
@@ -3441,7 +3441,7 @@ class PoolManager {
 			plan.currentChainIndex = undefined;
 			for (const cell of row.passed) this.recordTrace(`row cell ${cell} skipped (no eligible account)`);
 			if (row.problems.length) this.recordTrace(`row table problems: ${row.problems.join("; ")}`);
-		}
+		} else if (!owned) return false; // mine/row-failover: a provider no pool holds moves only along its row (Ops #995)
 
 		// mine/fallback-return: a refusal on the fallback pool goes back up to the primary pool first,
 		// once per turn; members that refused in this turn are attempted/exhausted and not offered.
