@@ -42,15 +42,16 @@ left panel (a Limits box under History, with a refresh button).
   chatgpt.com/settings/usage on `subscription_sharing_usage_limit_exceeded`, and OpenAI's docs
   publish no usage endpoint or headers for this sign-in. So the row asks nothing and carries a
   `note` (plain words, not a failure: `NO_USAGE_NOTES`); a reply whose error matches
-  `subscription_sharing_*usage_limit_exceeded` marks it `limited` with `limitedAt`, the next good
-  reply clears it (`recordReplyLimited`, from a `turn_end` hook); a check keeps the file's mark.
+  `subscription_sharing_*usage_limit_exceeded` or Pi 1.x's parsed `"Subscription Sharing usage limit"`
+  marks `replyLimited.openai` (and any `openai` row) with `limitedAt`, the next good reply clears it
+  (`recordReplyLimited`, from a `turn_end` hook); a check keeps the file's mark.
   Since 2026-11-04 the live host no longer lists `openai` (owner: "can you remove the chatgpt one too
   since i cant know the limit"; he signed in the Codex login, whose `ChatGPT (legacy)` row has real
   numbers): `limitsHost().bases` drops it, so no `ChatGPT` row is shown, not even from old readings
   (`listAccounts` skips a base the host doesn't list). Routing, the chain's GPT pool and the login are
-  unchanged; the note and LIMITED mark code stay for any host that lists it (`recordReplyLimited`
-  only updates an existing row, so it does nothing now). Undo: put `"openai"` back in `bases`.
-  Undo: drop `"openai"` from `limitsHost().bases` (the row goes; the mark hook then never matches).
+  unchanged; once a check has created the file, `recordReplyLimited` still writes `replyLimited.openai`
+  (ops #1050) so model routing honors the fresh mark without adding a `ChatGPT` row to `accounts`.
+  Undo: put `"openai"` back in `bases`.
 - **Stored entry kinds** (`credentialFailure`): `oauth` is checked; only `api_key` says "signed in
   with an API key"; any other entry (no type, unknown type, or malformed like the `{result,next}`
   left in auth.json on 2026-11-02, which made Claude 1-3 look like API keys) says "signed out (saved
@@ -71,7 +72,7 @@ checker fills them), `ProviderQuotaChecker.check` an optional `fetchImpl` (the C
 file; `session_start` registers the chat's store and installs the API, a second `session_shutdown`
 handler withdraws it; the `/subs` case runs the check (`--probe` only gets a note); completions gain
 `limit-check`.
-**Files:** `extensions/mine/subs-limits.ts`, `tests/subs-limits-check.mjs`; the two vm-based
+**Files:** `extensions/mine/subs-limits.ts`, `extensions/mine/limits-port.ts`, `tests/subs-limits-check.mjs`; the two vm-based
 harnesses (`tests/reset-first-check.mjs`, `tests/quota-routing-check.mjs`) spread the new module into
 their context.
 **Test:** `node tests/subs-limits-check.mjs` (fake fetch, temp files, no real calls): every account

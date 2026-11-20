@@ -100,3 +100,29 @@ export async function freshReadings(
 	if (ran === "checked" && after.stale.length) after.outcome = "check-failed";
 	return after;
 }
+
+/** Sanitize `replyLimited` timestamps (ms) for providers without usage numbers (`openai`), even when omitted from `accounts`. */
+export function sanitizeReplyLimited(
+	value: unknown, allowed: (provider: string) => boolean,
+): Record<string, number> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const entries = Object.entries(value as Record<string, unknown>)
+		.filter(([k, v]) => k.length <= 80 && allowed(k) && typeof v === "number" && Number.isFinite(v) && v > 0);
+	return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
+/** Set or clear a reply-limited mark on both `replyLimited` and any matching `accounts` row. */
+export function applyReplyLimited(
+	readings: LimitsReadings, provider: string, limited: boolean, now: number,
+): boolean {
+	const row = readings.accounts.find((a) => a.provider === provider);
+	const wasLimited = row ? Boolean(row.limited) : readings.replyLimited?.[provider] !== undefined;
+	if (wasLimited === limited) return false;
+	if (row) Object.assign(row, { limited: limited || undefined, limitedAt: limited ? now : undefined });
+	const marks = { ...readings.replyLimited };
+	if (limited) marks[provider] = now;
+	else delete marks[provider];
+	readings.replyLimited = Object.keys(marks).length ? marks : undefined;
+	readings.updatedAt = now;
+	return true;
+}

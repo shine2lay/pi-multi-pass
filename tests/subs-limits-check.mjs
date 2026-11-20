@@ -631,6 +631,7 @@ assert.equal(retryAfterMs(null), undefined);
 	// The LIMITED mark: a reply's usage-limit error sets it, the next good reply clears it.
 	assert.equal(isUsageLimitReply('OpenAI API error: 429 {"error":{"code":"subscription_sharing_usage_limit_exceeded"}}'), true);
 	assert.equal(isUsageLimitReply("subscription_sharing_workplace_individual_usage_limit_exceeded"), true);
+	assert.equal(isUsageLimitReply("The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead."), true);
 	assert.equal(isUsageLimitReply("429 Too Many Requests: rate limit"), false);
 	assert.deepEqual([hasNoUsageNumbers("openai"), hasNoUsageNumbers("openai-2"), hasNoUsageNumbers("openai-codex"), hasNoUsageNumbers("anthropic")], [true, true, false, false]);
 	const events = [];
@@ -659,6 +660,20 @@ assert.equal(retryAfterMs(null), undefined);
 	});
 	row = (await checkAllLimits(host, opts(file, racing))).accounts.find((a) => a.provider === "openai");
 	assert.deepEqual([row.limited, row.limitedAt], [true, NOW + 8 * MIN + 1]);
+	// Live host omits "openai" from bases (ba8e3c3): replyLimited still records and clears without adding a ChatGPT row.
+	resetShared();
+	const liveFile = newFile();
+	const liveHost = { ...withoutOpenai, checkOther: codexLike };
+	await checkAllLimits(liveHost, opts(liveFile, wham));
+	assert.deepEqual(readLimitsReadings(liveFile).accounts.map((a) => a.provider), ["openai-codex"]);
+	assert.equal(recordReplyLimited(liveFile, "openai", true, NOW + 9 * MIN), true, "recorded on live host without openai row");
+	assert.deepEqual(readLimitsReadings(liveFile).accounts.map((a) => a.provider), ["openai-codex"], "still no ChatGPT row");
+	assert.deepEqual(readLimitsReadings(liveFile).replyLimited, { openai: NOW + 9 * MIN });
+	clock = NOW + 10 * MIN;
+	await checkAllLimits(liveHost, opts(liveFile, wham));
+	assert.deepEqual(readLimitsReadings(liveFile).replyLimited, { openai: NOW + 9 * MIN }, "check preserves replyLimited");
+	assert.equal(recordReplyLimited(liveFile, "openai", false, NOW + 11 * MIN), true, "good reply clears replyLimited");
+	assert.equal(readLimitsReadings(liveFile).replyLimited, undefined);
 }
 
 /* --- concurrent checks join; the shared channel --- */

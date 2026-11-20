@@ -139,6 +139,14 @@ try {
 	assert.match(subs.formatLimitsText(got.readings, { now: clock }), /Claude 1 — no answer · last numbers 31 min ago: Weekly 33% used/);
 	const stale = routing.readingsFromLimits(got.readings);
 	assert.ok(stale.allowances.every((a) => !routing.isFresh(a, clock) && routing.forceRule(a, clock) === undefined));
+	const staleBy = Object.fromEntries(stale.allowances.map((a) => [a.id, a]));
+	assert.equal(routing.allowanceLimit(staleBy["claude-2"], "claude-fable-5-2", clock).limited, true, "100% with future resetAt stays limited when stale");
+	assert.equal(routing.allowanceLimit(staleBy["ag-gemini"], "gemini-4-carbon", clock).limited, true);
+	assert.equal(routing.allowanceLimit(staleBy["claude-1"], "claude-fable-5-2", clock).limited, false);
+	assert.equal(subs.recordReplyLimited(file, "openai", true, clock), true, "replyLimited recorded without openai row");
+	const withReplyMark = routing.readingsFromLimits(JSON.parse(readFileSync(file, "utf8")));
+	assert.equal(routing.allowanceLimit(withReplyMark.allowances.find((a) => a.id === "chatgpt"), "gpt-6-astra", clock).limited, true);
+	assert.equal(subs.recordReplyLimited(file, "openai", false, clock + MIN), true);
 
 	// 6. A failed attempt isn't repeated within 30 min (no 10 s wait at every decision); still stale.
 	const failedCalls = calls;

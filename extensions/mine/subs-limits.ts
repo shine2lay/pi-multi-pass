@@ -26,7 +26,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { formatResetIn } from "./reset-countdown.ts";
-import { freshReadings, type LimitsApiV1, type LimitsChannelV1, type LimitsEvent } from "./limits-port.ts";
+import { applyReplyLimited, freshReadings, sanitizeReplyLimited, type LimitsApiV1, type LimitsChannelV1, type LimitsEvent } from "./limits-port.ts";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -108,11 +108,11 @@ export interface LimitsAccount {
 
 export interface LimitsReadings {
 	version: 1;
-	/** ms: the last write. */
+	/** ms: the last write; `checkedAt`: when the last full check finished (absent = never checked). */
 	updatedAt: number;
-	/** ms: when the last full check finished. Absent = never checked. */
 	checkedAt?: number;
 	accounts: LimitsAccount[];
+	replyLimited?: Record<string, number>;
 }
 
 export const LIMITS_FILE_NAME = "subs-limits.json";
@@ -165,7 +165,7 @@ export function hasNoUsageNumbers(provider: string): boolean {
 
 /** A reply error that says the ChatGPT plan's shared usage limit is reached. */
 export function isUsageLimitReply(errorMessage: string): boolean {
-	return /subscription_sharing_[a-z_]*usage_limit_exceeded/.test(errorMessage);
+	return /subscription_sharing_[a-z_]*usage_limit_exceeded|subscription sharing usage limit/i.test(errorMessage);
 }
 
 function slotName(base: string, number: number): string {
@@ -771,12 +771,11 @@ function sanitizeAccount(value: unknown): LimitsAccount | undefined {
 export function sanitizeReadings(value: unknown): LimitsReadings | undefined {
 	const raw = record(value);
 	if (!raw || raw.version !== 1) return undefined;
+	const replyLimited = sanitizeReplyLimited(raw.replyLimited, hasNoUsageNumbers);
 	return {
-		version: 1,
-		updatedAt: finite(raw.updatedAt) ? raw.updatedAt : 0,
-		checkedAt: finite(raw.checkedAt) ? raw.checkedAt : undefined,
-		accounts: (Array.isArray(raw.accounts) ? raw.accounts : []).map(sanitizeAccount)
-			.filter((a): a is LimitsAccount => Boolean(a)).slice(0, 50),
+		version: 1, updatedAt: finite(raw.updatedAt) ? raw.updatedAt : 0, checkedAt: finite(raw.checkedAt) ? raw.checkedAt : undefined,
+		accounts: (Array.isArray(raw.accounts) ? raw.accounts : []).map(sanitizeAccount).filter((a): a is LimitsAccount => Boolean(a)).slice(0, 50),
+		...(replyLimited ? { replyLimited } : {}),
 	};
 }
 
@@ -891,7 +890,7 @@ export function checkAllLimits(host: LimitsHost, options: CheckOptions): Promise
 				: row;
 		});
 		const now = o.now();
-		const readings: LimitsReadings = { version: 1, updatedAt: now, checkedAt: now, accounts };
+		const readings: LimitsReadings = { version: 1, updatedAt: now, checkedAt: now, accounts, ...(current?.replyLimited ? { replyLimited: current.replyLimited } : {}) };
 		writeLimitsReadings(o.file, readings);
 		return readings;
 	})();
@@ -943,16 +942,12 @@ export function recordReplyLimits(file: string, provider: string, windows: Limit
 
 /**
  * A reply on an account without usage numbers (Sign in with ChatGPT): its usage-limit error
- * (`limited` true) marks the row LIMITED with the time; the next good reply (`limited` false)
- * clears it. Only rows a check created, and only on a change, are written.
+ * (`limited` true) marks `replyLimited` (and any Limits row) with the time; the next good reply
+ * (`limited` false) clears it. Written only after the first check and only on a change.
  */
 export function recordReplyLimited(file: string, provider: string, limited: boolean, now = Date.now()): boolean {
-	if (!hasNoUsageNumbers(provider)) return false;
-	const readings = readLimitsReadings(file);
-	const row = readings?.accounts.find((a) => a.provider === provider);
-	if (!readings || !row || Boolean(row.limited) === limited) return false;
-	Object.assign(row, { limited: limited || undefined, limitedAt: limited ? now : undefined });
-	readings.updatedAt = now;
+	const readings = hasNoUsageNumbers(provider) ? readLimitsReadings(file) : undefined;
+	if (!readings || !applyReplyLimited(readings, provider, limited, now)) return false;
 	writeLimitsReadings(file, readings);
 	emit({ checking: limitsChecking(), readings });
 	return true;
